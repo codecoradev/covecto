@@ -4,6 +4,9 @@ pub enum Error {
     #[error("Invalid engine: {0}")]
     InvalidEngine(String),
 
+    #[error("Invalid config: {0}")]
+    InvalidConfig(String),
+
     #[error("Image decode error: {0}")]
     ImageDecode(#[from] image::ImageError),
 
