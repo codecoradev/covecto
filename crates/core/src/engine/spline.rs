@@ -17,6 +17,22 @@ pub fn vectorize(img: &RgbaImage, config: &VectorizeConfig) -> Result<String> {
     Ok(svg_file.to_string())
 }
 
+/// Stream vtracer output to a writer. Falls back to in-memory String since vtracer
+/// doesn't support streaming, but avoids a second copy when writing to disk.
+pub fn vectorize_to<W: std::io::Write>(
+    writer: &mut W,
+    img: &RgbaImage,
+    config: &VectorizeConfig,
+) -> Result<super::pixel_exact::VectorizeMeta> {
+    let svg = vectorize(img, config)?;
+    let bytes = svg.as_bytes();
+    writer.write_all(bytes)?;
+    Ok(super::pixel_exact::VectorizeMeta {
+        byte_count: bytes.len(),
+        path_count: svg.matches("<path").count(),
+    })
+}
+
 fn to_color_image(img: &RgbaImage) -> vtracer::ColorImage {
     let (w, h) = (img.width() as usize, img.height() as usize);
     let raw = img.as_raw();

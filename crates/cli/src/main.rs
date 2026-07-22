@@ -7,10 +7,12 @@ use clap::{Parser, Subcommand};
 use covecto_core::{
     ColorMode, Engine, HierarchicalMode, OptimizeConfig, OptimizePreset, OutputFormat,
     PathSimplifyMode, SplinePreset, VectorizeConfig, convert_output, load_image, vectorize,
+    vectorize_to,
 };
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use serde::Serialize;
+use std::io::Write;
 use tracing::info;
 
 /// Covecto — Cora Vectorizer. Dual-engine image-to-SVG vectorization.
@@ -289,6 +291,7 @@ fn apply_output_template(template: &str, stem: &str, ext: &str) -> String {
 
 /// Vectorize a single file and optionally write output.
 /// Returns the result and output bytes for JSON reporting.
+/// Uses streaming I/O for SVG output to avoid holding full SVG in memory.
 fn vectorize_single_raw(
     input: &Path,
     output: Option<&Path>,
@@ -297,7 +300,6 @@ fn vectorize_single_raw(
 ) -> anyhow::Result<(covecto_core::VectorizeResult, usize, PathBuf)> {
     let img = load_image(input)?;
     let req = covecto_core::VectorizeRequest::new(img).with_config(config.clone());
-    let result = vectorize(&req)?;
 
     let out_path = match output {
         Some(p) => p.to_path_buf(),
@@ -315,21 +317,40 @@ fn vectorize_single_raw(
         std::fs::create_dir_all(parent)?;
     }
 
-    let (bytes, _content_type) = convert_output(&result.svg, *format)?;
-    std::fs::write(&out_path, &bytes)?;
+    let (bytes, result) = if *format == OutputFormat::Svg {
+        // Streaming path: write SVG directly to file via BufWriter
+        let file = std::fs::File::create(&out_path)?;
+        let mut writer = std::io::BufWriter::new(file);
+        let stream_result = vectorize_to(&mut writer, &req)?;
+        writer.flush()?;
+        let svg_bytes = stream_result.metadata.svg_byte_size;
+        // Wrap in VectorizeResult for JSON reporting
+        let result = covecto_core::VectorizeResult {
+            svg: String::new(), // not needed for file output
+            engine_used: stream_result.engine_used,
+            metadata: stream_result.metadata,
+        };
+        (svg_bytes, result)
+    } else {
+        // Non-SVG formats need the String for convert_output
+        let result = vectorize(&req)?;
+        let (bytes, _content_type) = convert_output(&result.svg, *format)?;
+        std::fs::write(&out_path, &bytes)?;
+        (bytes.len(), result)
+    };
 
     info!(
         "✓ {} → {} ({}ms, {} bytes, {} paths, engine={}, format={})",
         input.display(),
         out_path.display(),
         result.metadata.processing_time_ms,
-        bytes.len(),
+        bytes,
         result.metadata.path_count,
         result.engine_used,
         format.extension(),
     );
 
-    Ok((result, bytes.len(), out_path))
+    Ok((result, bytes, out_path))
 }
 
 fn make_spinner(msg: &str) -> ProgressBar {
