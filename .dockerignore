@@ -1,0 +1,10 @@
+target/
+.git/
+.github/
+*.md
+tests/
+.dockerignore
+docker-compose.yml
+.cora/
+*.profraw
+*.svg

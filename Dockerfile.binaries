@@ -1,0 +1,41 @@
+# ── Binary-based Docker image (used by release workflow) ────
+# Expects pre-built binaries in ./binaries/ directory:
+#   covecto-amd64, covecto-arm64
+
+FROM debian:bookworm-slim
+
+ARG TARGETARCH
+ARG VERSION=dev
+
+LABEL org.opencontainers.image.version=${VERSION}
+LABEL org.opencontainers.image.title=covecto
+LABEL org.opencontainers.image.description="Dual-engine image-to-SVG vectorization"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl libssl3 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN groupadd --system --gid 1000 covecto && \
+    useradd --system --uid 1000 --gid covecto --home /data covecto
+
+# Copy both binaries, select correct one for architecture
+COPY binaries/ /tmp/binaries/
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+      mv /tmp/binaries/covecto-arm64 /usr/local/bin/covecto; \
+    else \
+      mv /tmp/binaries/covecto-amd64 /usr/local/bin/covecto; \
+    fi && \
+    chmod +x /usr/local/bin/covecto && \
+    rm -rf /tmp/binaries
+
+ENV COVECTO_PORT=3000
+
+RUN mkdir -p /data && chown covecto:covecto /data
+
+USER covecto
+
+EXPOSE 3000
+
+ENTRYPOINT ["covecto"]
+CMD ["serve", "--port", "3000"]

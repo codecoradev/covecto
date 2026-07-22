@@ -1,0 +1,27 @@
+# Covecto Docker Compose
+# Image: ghcr.io/codecoradev/covecto:latest
+services:
+  covecto:
+    image: ghcr.io/codecoradev/covecto:latest
+    container_name: covecto
+    ports:
+      - "${COVECTO_PORT:-3000}:3000"
+    volumes:
+      - covecto-data:/data
+    environment:
+      - RUST_LOG=info
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '2.0'
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/v1/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  covecto-data:
