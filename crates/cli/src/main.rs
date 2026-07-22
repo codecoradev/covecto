@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use covecto_core::{
-    Engine, OptimizeConfig, OptimizePreset, SplinePreset, VectorizeConfig, load_image,
-    optimize_svg, vectorize,
+    ColorMode, Engine, HierarchicalMode, OptimizeConfig, OptimizePreset, PathSimplifyMode,
+    SplinePreset, VectorizeConfig, load_image, vectorize,
 };
 use tracing::info;
 
@@ -16,6 +16,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Vectorize one or more images to SVG
     Vectorize {
@@ -28,9 +29,45 @@ enum Commands {
         /// Engine: auto, spline, pixel-exact (default: auto)
         #[arg(short, long, default_value = "auto")]
         engine: String,
-        /// Spline preset: bw, poster, photo (overrides individual params)
+        /// vtracer preset: bw, poster, photo (overrides individual params)
         #[arg(long)]
         preset: Option<String>,
+        /// Custom preset: icon, logo, photo, lineart (overrides individual params)
+        #[arg(long)]
+        profile: Option<String>,
+        /// Color quantization precision (1-32, higher = more colors)
+        #[arg(long)]
+        color_precision: Option<i32>,
+        /// Filter speckle noise smaller than this size
+        #[arg(long)]
+        filter_speckle: Option<usize>,
+        /// Corner detection threshold (0-180, higher = fewer corners)
+        #[arg(long)]
+        corner_threshold: Option<i32>,
+        /// Path splice threshold (0-100)
+        #[arg(long)]
+        splice_threshold: Option<i32>,
+        /// Color mode: color, binary
+        #[arg(long)]
+        color_mode: Option<String>,
+        /// Hierarchical mode: stacked, cutout
+        #[arg(long)]
+        hierarchical: Option<String>,
+        /// Path simplification: spline, polygon, none
+        #[arg(long)]
+        path_simplify: Option<String>,
+        /// Layer difference threshold
+        #[arg(long)]
+        layer_difference: Option<i32>,
+        /// Minimum path length
+        #[arg(long)]
+        length_threshold: Option<f64>,
+        /// Max color quantization iterations
+        #[arg(long)]
+        max_iterations: Option<usize>,
+        /// Path coordinate precision (decimal places)
+        #[arg(long)]
+        path_precision: Option<u32>,
         /// Run SVG optimization after vectorization
         #[arg(long, default_value = "true")]
         optimize: bool,
@@ -53,21 +90,11 @@ enum Commands {
 }
 
 fn parse_engine(s: &str) -> anyhow::Result<Engine> {
-    match s.to_lowercase().as_str() {
-        "auto" => Ok(Engine::Auto),
-        "spline" => Ok(Engine::Spline),
-        "pixel-exact" | "pixel_exact" => Ok(Engine::PixelExact),
-        _ => anyhow::bail!("Unknown engine: {s}. Use: auto, spline, pixel-exact"),
-    }
+    s.parse::<Engine>().map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
 fn parse_spline_preset(s: &str) -> anyhow::Result<SplinePreset> {
-    match s.to_lowercase().as_str() {
-        "bw" => Ok(SplinePreset::Bw),
-        "poster" => Ok(SplinePreset::Poster),
-        "photo" => Ok(SplinePreset::Photo),
-        _ => anyhow::bail!("Unknown preset: {s}. Use: bw, poster, photo"),
-    }
+    s.parse::<SplinePreset>().map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
 fn parse_opt_preset(s: &str) -> OptimizePreset {
@@ -78,11 +105,40 @@ fn parse_opt_preset(s: &str) -> OptimizePreset {
     }
 }
 
+fn parse_color_mode(s: &str) -> anyhow::Result<ColorMode> {
+    s.parse::<ColorMode>().map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+fn parse_hierarchical(s: &str) -> anyhow::Result<HierarchicalMode> {
+    s.parse::<HierarchicalMode>().map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+fn parse_path_simplify(s: &str) -> anyhow::Result<PathSimplifyMode> {
+    s.parse::<PathSimplifyMode>().map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+/// Apply a custom profile preset (delegates to covecto_core).
+fn apply_profile(name: &str, config: &mut VectorizeConfig) {
+    covecto_core::apply_profile(name, config);
+}
+
 #[derive(Clone)]
 struct VectorizeOpts {
     output: Option<PathBuf>,
     engine: String,
     preset: Option<String>,
+    profile: Option<String>,
+    color_precision: Option<i32>,
+    filter_speckle: Option<usize>,
+    corner_threshold: Option<i32>,
+    splice_threshold: Option<i32>,
+    color_mode: Option<String>,
+    hierarchical: Option<String>,
+    path_simplify: Option<String>,
+    layer_difference: Option<i32>,
+    length_threshold: Option<f64>,
+    max_iterations: Option<usize>,
+    path_precision: Option<u32>,
     optimize: bool,
     optimize_preset: String,
     multipass: bool,
@@ -91,24 +147,34 @@ struct VectorizeOpts {
 
 impl VectorizeOpts {
     fn to_config(&self) -> anyhow::Result<VectorizeConfig> {
-        let engine = parse_engine(&self.engine)?;
-        let spline_preset = self
-            .preset
-            .as_deref()
-            .map(parse_spline_preset)
-            .transpose()?;
-        let opt_preset = parse_opt_preset(&self.optimize_preset);
-        Ok(VectorizeConfig {
-            engine,
+        let mut config = VectorizeConfig {
+            engine: parse_engine(&self.engine)?,
             optimize: self.optimize,
             optimize_config: OptimizeConfig {
-                preset: opt_preset,
+                preset: parse_opt_preset(&self.optimize_preset),
                 multipass: self.multipass,
                 multipass_iterations: self.multipass_iterations,
             },
-            spline_preset,
-            ..Default::default()
-        })
+            spline_preset: self.preset.as_deref().map(parse_spline_preset).transpose()?,
+            color_precision: self.color_precision,
+            filter_speckle: self.filter_speckle,
+            corner_threshold: self.corner_threshold,
+            splice_threshold: self.splice_threshold,
+            color_mode: self.color_mode.as_deref().map(parse_color_mode).transpose()?,
+            hierarchical: self.hierarchical.as_deref().map(parse_hierarchical).transpose()?,
+            path_simplify_mode: self.path_simplify.as_deref().map(parse_path_simplify).transpose()?,
+            layer_difference: self.layer_difference,
+            length_threshold: self.length_threshold,
+            max_iterations: self.max_iterations,
+            path_precision: self.path_precision,
+        };
+
+        // Apply profile preset (overrides individual params)
+        if let Some(ref profile) = self.profile {
+            apply_profile(profile, &mut config);
+        }
+
+        Ok(config)
     }
 }
 
@@ -117,22 +183,16 @@ fn vectorize_single(input: &Path, output: &Path, config: &VectorizeConfig) -> an
     let req = covecto_core::VectorizeRequest::new(img).with_config(config.clone());
     let result = vectorize(&req)?;
 
-    let svg = if config.optimize {
-        optimize_svg(&result.svg, &config.optimize_config)?
-    } else {
-        result.svg
-    };
-
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(output, &svg)?;
+    std::fs::write(output, &result.svg)?;
     info!(
         "✓ {} → {} ({}ms, {} bytes, {} paths, engine={})",
         input.display(),
         output.display(),
         result.metadata.processing_time_ms,
-        svg.len(),
+        result.svg.len(),
         result.metadata.path_count,
         result.engine_used,
     );
@@ -171,14 +231,10 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
             Some(out) => vectorize_single(input, out, &config)?,
             None => {
                 let img = load_image(input)?;
-                let req = covecto_core::VectorizeRequest::new(img).with_config(config.clone());
+                let req =
+                    covecto_core::VectorizeRequest::new(img).with_config(config.clone());
                 let result = vectorize(&req)?;
-                let svg = if config.optimize {
-                    optimize_svg(&result.svg, &config.optimize_config)?
-                } else {
-                    result.svg
-                };
-                println!("{svg}");
+                println!("{}", result.svg);
             }
         }
     }
@@ -195,16 +251,6 @@ fn is_image_file(path: &Path) -> bool {
     )
 }
 
-fn _print_result_summary(result: &covecto_core::VectorizeResult) {
-    println!(
-        "Engine: {} | Time: {}ms | Size: {} bytes | Paths: {}",
-        result.engine_used,
-        result.metadata.processing_time_ms,
-        result.metadata.svg_byte_size,
-        result.metadata.path_count,
-    );
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
@@ -216,6 +262,18 @@ async fn main() -> anyhow::Result<()> {
             output,
             engine,
             preset,
+            profile,
+            color_precision,
+            filter_speckle,
+            corner_threshold,
+            splice_threshold,
+            color_mode,
+            hierarchical,
+            path_simplify,
+            layer_difference,
+            length_threshold,
+            max_iterations,
+            path_precision,
             optimize,
             optimize_preset,
             multipass,
@@ -225,6 +283,18 @@ async fn main() -> anyhow::Result<()> {
                 output,
                 engine,
                 preset,
+                profile,
+                color_precision,
+                filter_speckle,
+                corner_threshold,
+                splice_threshold,
+                color_mode,
+                hierarchical,
+                path_simplify,
+                layer_difference,
+                length_threshold,
+                max_iterations,
+                path_precision,
                 optimize,
                 optimize_preset,
                 multipass,
