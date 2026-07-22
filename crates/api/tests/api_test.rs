@@ -31,13 +31,10 @@ fn build_multipart(boundary: &str, parts: &[(&str, &str, &[u8])]) -> Vec<u8> {
     for (name, filename, data) in parts {
         body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
         body.extend_from_slice(
-            format!(
-                "Content-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\n"
-            )
-            .as_bytes(),
+            format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\n")
+                .as_bytes(),
         );
-        if filename.ends_with(".png") || filename.ends_with(".jpg") || filename.ends_with(".jpeg")
-        {
+        if filename.ends_with(".png") || filename.ends_with(".jpg") || filename.ends_with(".jpeg") {
             body.extend_from_slice(b"Content-Type: image/png\r\n");
         } else if filename.ends_with(".svg") {
             body.extend_from_slice(b"Content-Type: image/svg+xml\r\n");
@@ -76,9 +73,7 @@ async fn test_health_endpoint() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let body = axum::body::to_bytes(resp.into_body(), 1024)
-        .await
-        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "ok");
     assert!(json["version"].is_string());
@@ -95,9 +90,7 @@ async fn test_metrics_endpoint() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let body = axum::body::to_bytes(resp.into_body(), 1024)
-        .await
-        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["request_count"], 0);
     assert_eq!(json["avg_processing_ms"], 0.0);
@@ -334,9 +327,7 @@ async fn test_metrics_increment_after_vectorize() {
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
-    let body = axum::body::to_bytes(resp.into_body(), 1024)
-        .await
-        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["request_count"], 1);
 }
