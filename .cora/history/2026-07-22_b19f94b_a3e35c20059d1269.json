@@ -1,0 +1,16 @@
+{
+  "timestamp": "2026-07-22T04:52:58.118355574Z",
+  "commit": "b19f94b",
+  "branch": "develop",
+  "files_reviewed": 0,
+  "lines_reviewed": null,
+  "findings": {
+    "major": 4
+  },
+  "categories": {
+    "other": 4
+  },
+  "quality_score": 6.0,
+  "gate_status": "disabled",
+  "duration_ms": null
+}

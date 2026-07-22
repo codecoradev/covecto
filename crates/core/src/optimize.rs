@@ -61,15 +61,16 @@ pub fn optimize_svg(svg: &str, config: &OptimizeConfig) -> Result<String> {
 
 /// Remove XML prolog `<?xml ...?>`.
 fn remove_xml_prolog(s: &str) -> String {
-    if let Some(idx) = s.find("<?xml")
-        && let Some(end) = s[idx..].find("?>")
-    {
-        let mut result = String::with_capacity(s.len());
-        result.push_str(&s[..idx]);
-        result.push_str(&s[idx + end + 2..]);
-        return result.trim_start().to_string();
-    }
-    s.to_string()
+    let Some(idx) = s.find("<?xml") else {
+        return s.to_string();
+    };
+    let Some(end) = s[idx..].find("?>") else {
+        return s.to_string();
+    };
+    let mut result = String::with_capacity(s.len());
+    result.push_str(&s[..idx]);
+    result.push_str(&s[idx + end + 2..]);
+    result.trim_start().to_string()
 }
 
 /// Remove XML comments `<!-- ... -->`.
@@ -112,9 +113,10 @@ fn remove_metadata_elements(s: &str) -> String {
         }
     }
     // Remove self-closing empty defs
-    while let Some(start) = result.find("<defs")
-        && let Some(end) = result[start..].find("/>")
-    {
+    while let Some(start) = result.find("<defs") {
+        let Some(end) = result[start..].find("/>") else {
+            break;
+        };
         let end = start + end + 2;
         let trimmed_end = result[end..]
             .char_indices()
@@ -129,9 +131,10 @@ fn remove_metadata_elements(s: &str) -> String {
 /// Remove empty self-closing `<g .../>` elements.
 fn remove_empty_groups(s: &str) -> String {
     let mut result = s.to_string();
-    while let Some(start) = result.find("<g ")
-        && let Some(end) = result[start..].find("/>")
-    {
+    while let Some(start) = result.find("<g ") {
+        let Some(end) = result[start..].find("/>") else {
+            break;
+        };
         let end = start + end + 2;
         let trimmed_end = result[end..]
             .char_indices()

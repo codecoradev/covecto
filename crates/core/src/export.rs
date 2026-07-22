@@ -103,7 +103,7 @@ fn svg_to_eps(svg: &str) -> Result<Vec<u8>> {
 
     // Render nodes recursively
     for node in tree.root().children() {
-        render_node(&node, &mut ps);
+        render_node(node, &mut ps);
     }
 
     ps.push_str("\nshowpage\n%%EOF\n");
@@ -116,7 +116,7 @@ fn render_node(node: &usvg::Node, ps: &mut String) {
         usvg::Node::Path(path) => render_path(path, ps),
         usvg::Node::Group(group) => {
             for child in group.children() {
-                render_node(&child, ps);
+                render_node(child, ps);
             }
         }
         _ => {} // Skip text, image, etc.
