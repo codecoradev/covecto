@@ -3,7 +3,7 @@
 pub(crate) mod routes;
 pub(crate) mod state;
 
-pub use state::AppState;
+pub use state::{AppState, create_app_state};
 
 use axum::Router;
 use axum::routing::{get, post};
