@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use clap::{Parser, Subcommand};
 use covecto_core::{
@@ -7,6 +9,7 @@ use covecto_core::{
     PathSimplifyMode, SplinePreset, VectorizeConfig, convert_output, load_image, vectorize,
 };
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 use serde::Serialize;
 use tracing::info;
 
@@ -597,63 +600,106 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
     }
 
     let show_progress = !opts.no_progress && !files.is_empty();
-    let (_multi, pb) = if show_progress {
+    let (multi, pb) = if show_progress {
         let (m, p) = make_progress(files.len());
         (Some(m), Some(p))
     } else {
         (None, None)
     };
 
-    let mut results = Vec::with_capacity(files.len());
-    let mut count = 0u32;
-    let mut errors = 0u32;
+    // Pre-compute output paths (sequential — needs HashSet for dedup)
+    let out_paths: Vec<PathBuf> = {
+        let mut used_names = HashSet::with_capacity(files.len());
+        files
+            .iter()
+            .map(|file| {
+                let mut out_path =
+                    compute_output_path(file, root, &out_dir, template, ext, preserve_structure);
 
-    let mut used_names: HashSet<String> = HashSet::with_capacity(files.len());
-    for file in &files {
-        let mut out_path =
-            compute_output_path(file, root, &out_dir, template, ext, preserve_structure);
-
-        // Deduplicate output filenames to prevent silent overwrites
-        if !preserve_structure {
-            let name = out_path.file_name().unwrap().to_string_lossy().to_string();
-            if !used_names.insert(name) {
-                let stem = file.file_stem().unwrap().to_string_lossy().to_string();
-                let parent_dir = file
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown");
-                let unique_name = format!("{parent_dir}_{stem}.{ext}");
-                out_path = out_dir.join(&unique_name);
-                used_names.insert(unique_name);
-            }
-        }
-
-        match vectorize_single_raw(file, Some(&out_path), &config, &format) {
-            Ok((result, bytes, out)) => {
-                if opts.json {
-                    results.push(JsonResult::from_result(file, &out, &result, &format, bytes));
+                // Deduplicate output filenames to prevent silent overwrites
+                if !preserve_structure {
+                    let name = out_path.file_name().unwrap().to_string_lossy().to_string();
+                    if !used_names.insert(name) {
+                        let stem = file.file_stem().unwrap().to_string_lossy().to_string();
+                        let parent_dir = file
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown");
+                        let mut candidate = format!("{parent_dir}_{stem}.{ext}");
+                        let mut counter: usize = 1;
+                        while !used_names.insert(candidate.clone()) {
+                            counter += 1;
+                            candidate = format!("{parent_dir}_{stem}_{counter}.{ext}");
+                        }
+                        out_path = out_dir.join(candidate);
+                    }
                 }
-                count += 1;
-            }
-            Err(e) => {
-                eprintln!("✗ {}: {e}", file.display());
-                errors += 1;
-            }
-        }
+                out_path
+            })
+            .collect()
+    };
 
-        if let Some(ref p) = pb {
-            p.inc(1);
-        }
-    }
+    // Atomic counters for thread-safe progress and error tracking
+    let count = AtomicU32::new(0);
+    let error_count = AtomicU32::new(0);
+    let error_list = Mutex::new(Vec::new());
+
+    // Store results as (index, JsonResult) to preserve input ordering
+    let indexed_results: Vec<(usize, JsonResult)> = files
+        .par_iter()
+        .zip(out_paths.par_iter())
+        .enumerate()
+        .filter_map(|(idx, (file, out_path))| {
+            let res = vectorize_single_raw(file, Some(out_path), &config, &format);
+            if let Some(ref p) = pb {
+                p.inc(1);
+            }
+            match res {
+                Ok((result, bytes, out)) => {
+                    count.fetch_add(1, Ordering::Relaxed);
+                    if opts.json {
+                        Some((
+                            idx,
+                            JsonResult::from_result(file, &out, &result, &format, bytes),
+                        ))
+                    } else {
+                        None
+                    }
+                }
+                Err(e) => {
+                    error_count.fetch_add(1, Ordering::Relaxed);
+                    error_list
+                        .lock()
+                        .unwrap()
+                        .push((file.display().to_string(), e.to_string()));
+                    None
+                }
+            }
+        })
+        .collect();
 
     if let Some(p) = pb {
         p.finish_and_clear();
     }
-    drop(_multi);
+    drop(multi);
+
+    // Report errors collected from threads
+    let errors = error_list.into_inner().unwrap();
+    for (path, err) in &errors {
+        eprintln!("\u{2717} {path}: {err}");
+    }
+
+    let count = count.load(Ordering::Relaxed);
+    let error_count = errors.len() as u32;
+
+    // Sort by original index to preserve input ordering in JSON output
+    let mut sorted_results = indexed_results;
+    sorted_results.sort_by_key(|(idx, _)| *idx);
+    let results: Vec<JsonResult> = sorted_results.into_iter().map(|(_, r)| r).collect();
 
     if !opts.json && !opts.no_progress {
-        println!("Done: {count} converted, {errors} errors");
+        println!("Done: {count} converted, {error_count} errors");
     }
 
     if opts.json {

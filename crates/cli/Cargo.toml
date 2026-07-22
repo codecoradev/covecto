@@ -26,3 +26,4 @@ indicatif = { workspace = true }
 walkdir = { workspace = true }
 glob = { workspace = true }
 image = { workspace = true }
+rayon = { workspace = true }
