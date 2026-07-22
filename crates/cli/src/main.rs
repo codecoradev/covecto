@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use covecto_core::{
-    ColorMode, Engine, HierarchicalMode, OptimizeConfig, OptimizePreset, PathSimplifyMode,
-    SplinePreset, VectorizeConfig, load_image, vectorize,
+    ColorMode, Engine, HierarchicalMode, OptimizeConfig, OptimizePreset, OutputFormat,
+    PathSimplifyMode, SplinePreset, VectorizeConfig, convert_output, load_image, vectorize,
 };
 use tracing::info;
 
@@ -26,6 +26,9 @@ enum Commands {
         /// Output file or directory (default: stdout / INPUT/vectorized/)
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Output format: svg, pdf, eps (default: svg)
+        #[arg(short = 'F', long, default_value = "svg")]
+        format: String,
         /// Engine: auto, spline, pixel-exact (default: auto)
         #[arg(short, long, default_value = "auto")]
         engine: String,
@@ -125,6 +128,7 @@ fn apply_profile(name: &str, config: &mut VectorizeConfig) {
 #[derive(Clone)]
 struct VectorizeOpts {
     output: Option<PathBuf>,
+    format: String,
     engine: String,
     preset: Option<String>,
     profile: Option<String>,
@@ -178,7 +182,16 @@ impl VectorizeOpts {
     }
 }
 
-fn vectorize_single(input: &Path, output: &Path, config: &VectorizeConfig) -> anyhow::Result<()> {
+fn parse_output_format(s: &str) -> anyhow::Result<OutputFormat> {
+    s.parse::<OutputFormat>()
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+fn output_extension(format: &OutputFormat) -> &'static str {
+    format.extension()
+}
+
+fn vectorize_single(input: &Path, output: &Path, config: &VectorizeConfig, format: &OutputFormat) -> anyhow::Result<()> {
     let img = load_image(input)?;
     let req = covecto_core::VectorizeRequest::new(img).with_config(config.clone());
     let result = vectorize(&req)?;
@@ -186,21 +199,27 @@ fn vectorize_single(input: &Path, output: &Path, config: &VectorizeConfig) -> an
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(output, &result.svg)?;
+
+    let (bytes, _content_type) = convert_output(&result.svg, *format)?;
+
+    std::fs::write(output, &bytes)?;
     info!(
-        "✓ {} → {} ({}ms, {} bytes, {} paths, engine={})",
+        "✓ {} → {} ({}ms, {} bytes, {} paths, engine={}, format={})",
         input.display(),
         output.display(),
         result.metadata.processing_time_ms,
-        result.svg.len(),
+        bytes.len(),
         result.metadata.path_count,
         result.engine_used,
+        format.extension(),
     );
     Ok(())
 }
 
 fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
     let config = opts.to_config()?;
+    let format = parse_output_format(&opts.format)?;
+    let ext = output_extension(&format);
 
     if input.is_dir() {
         let out_dir = opts
@@ -215,8 +234,8 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
             let path = entry.path();
             if path.is_file() && is_image_file(&path) {
                 let stem = path.file_stem().unwrap().to_string_lossy().to_string();
-                let out_path = out_dir.join(format!("{stem}.svg"));
-                match vectorize_single(&path, &out_path, &config) {
+                let out_path = out_dir.join(format!("{stem}.{ext}"));
+                match vectorize_single(&path, &out_path, &config, &format) {
                     Ok(()) => count += 1,
                     Err(e) => {
                         eprintln!("✗ {}: {e}", path.display());
@@ -228,13 +247,14 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
         println!("Done: {count} converted, {errors} errors");
     } else {
         match opts.output.as_deref() {
-            Some(out) => vectorize_single(input, out, &config)?,
+            Some(out) => vectorize_single(input, out, &config, &format)?,
             None => {
                 let img = load_image(input)?;
                 let req =
                     covecto_core::VectorizeRequest::new(img).with_config(config.clone());
                 let result = vectorize(&req)?;
-                println!("{}", result.svg);
+                let (bytes, _ct) = convert_output(&result.svg, format)?;
+                std::io::Write::write_all(&mut std::io::stdout(), &bytes)?;
             }
         }
     }
@@ -260,6 +280,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Vectorize {
             input,
             output,
+            format,
             engine,
             preset,
             profile,
@@ -281,6 +302,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let opts = VectorizeOpts {
                 output,
+                format,
                 engine,
                 preset,
                 profile,

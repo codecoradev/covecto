@@ -4,8 +4,8 @@ use axum::{
     response::{IntoResponse, Json, Response},
 };
 use covecto_core::{
-    Engine, OptimizeConfig, OptimizePreset, VectorizeConfig, VectorizeRequest,
-    load_image_from_bytes, optimize_svg, vectorize as core_vectorize,
+    Engine, OptimizeConfig, OptimizePreset, OutputFormat, VectorizeConfig, VectorizeRequest,
+    convert_output, load_image_from_bytes, optimize_svg, vectorize as core_vectorize,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -40,6 +40,7 @@ pub async fn metrics(State(state): State<AppState>) -> Json<MetricsResponse> {
 
 #[derive(Deserialize)]
 struct VectorizeParams {
+    format: Option<String>,
     engine: Option<String>,
     profile: Option<String>,
     optimize: Option<bool>,
@@ -70,8 +71,9 @@ pub struct VectorizeResponse {
 pub async fn vectorize_handler(
     State(state): State<AppState>,
     mut multipart: Multipart,
-) -> Result<Json<VectorizeResponse>, AppError> {
+) -> Result<Response, AppError> {
     let mut params = VectorizeParams {
+        format: None,
         engine: None,
         profile: None,
         optimize: None,
@@ -101,6 +103,7 @@ pub async fn vectorize_handler(
         } else {
             let value = field.text().await.map_err(AppError::Multipart)?;
             match name.as_str() {
+                "format" => params.format = Some(value),
                 "engine" => params.engine = Some(value),
                 "optimize" => params.optimize = value.parse().ok(),
                 "optimize_preset" => params.optimize_preset = Some(value),
@@ -180,11 +183,29 @@ pub async fn vectorize_handler(
         result.metadata.path_count,
     );
 
+    // Non-SVG formats: return raw bytes with content-type header
+    let output_format: OutputFormat = params
+        .format
+        .as_deref()
+        .unwrap_or("svg")
+        .parse::<OutputFormat>()
+        .map_err(|e: covecto_core::Error| AppError::BadRequest(e.to_string()))?;
+
+    if output_format != OutputFormat::Svg {
+        let (bytes, content_type) =
+            convert_output(&result.svg, output_format).map_err(AppError::Core)?;
+        return Ok((
+            [("content-type", content_type.as_str())],
+            bytes,
+        ).into_response());
+    }
+
+    // Default: JSON with SVG string
     Ok(Json(VectorizeResponse {
         svg: result.svg,
         engine_used: result.engine_used.to_string(),
         metadata: serde_json::to_value(result.metadata).unwrap_or_default(),
-    }))
+    }).into_response())
 }
 #[derive(Serialize)]
 pub struct OptimizeResponse {
