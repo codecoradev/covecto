@@ -32,6 +32,9 @@ pub enum Error {
 
     #[error("Invalid request: {0}")]
     BadRequest(String),
+
+    #[error("Conversion error: {0}")]
+    Conversion(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

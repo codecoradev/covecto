@@ -18,3 +18,5 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 roxmltree = "0.20"
+svg2pdf = { version = "0.13.0", features = ["image", "text"] }
+usvg = "0.45"

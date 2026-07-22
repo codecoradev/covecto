@@ -36,13 +36,6 @@ impl std::str::FromStr for Engine {
     }
 }
 
-/// Output format for the vectorized result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum OutputFormat {
-    #[default]
-    Svg,
-}
-
 /// Optimization configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OptimizeConfig {
@@ -157,7 +150,9 @@ impl std::str::FromStr for ColorMode {
         match s.to_lowercase().as_str() {
             "color" => Ok(ColorMode::Color),
             "binary" | "bw" => Ok(ColorMode::Binary),
-            _ => Err(crate::Error::InvalidConfig(format!("Unknown color mode: {s}"))),
+            _ => Err(crate::Error::InvalidConfig(format!(
+                "Unknown color mode: {s}"
+            ))),
         }
     }
 }
