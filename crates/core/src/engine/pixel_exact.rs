@@ -120,24 +120,25 @@ pub fn vectorize(img: &RgbaImage) -> Result<String> {
                         let next_point = (last_point.0 + direction.0, last_point.1 + direction.1);
                         let next_edge = (last_point, next_point);
 
-                        if let Ok(idx) = current_edges.binary_search(&next_edge)
-                            && !used[idx]
-                        {
-                            used[idx] = true;
+                        match current_edges.binary_search(&next_edge) {
+                            Ok(idx) if !used[idx] => {
+                                used[idx] = true;
 
-                            // Collapse consecutive same-direction moves
-                            if piece.len() >= 2 {
-                                let prev_direction = (
-                                    piece[piece.len() - 1].0 - piece[piece.len() - 2].0,
-                                    piece[piece.len() - 1].1 - piece[piece.len() - 2].1,
-                                );
-                                if prev_direction == direction {
-                                    piece.pop();
+                                // Collapse consecutive same-direction moves
+                                if piece.len() >= 2 {
+                                    let prev_direction = (
+                                        piece[piece.len() - 1].0 - piece[piece.len() - 2].0,
+                                        piece[piece.len() - 1].1 - piece[piece.len() - 2].1,
+                                    );
+                                    if prev_direction == direction {
+                                        piece.pop();
+                                    }
                                 }
+                                piece.push(next_point);
+                                found = true;
+                                break;
                             }
-                            piece.push(next_point);
-                            found = true;
-                            break;
+                            _ => {}
                         }
                     }
 
@@ -229,8 +230,7 @@ pub fn vectorize(img: &RgbaImage) -> Result<String> {
 
 fn svg_header(width: u32, height: u32) -> String {
     format!(
-        r#"<svg width="{}" height="{}" xmlns="http://www.w3.org/2000/svg">
-"#,
+        r#"<svg width="{}" height="{}" xmlns="http://www.w3.org/2000/svg">"#,
         width, height
     )
 }

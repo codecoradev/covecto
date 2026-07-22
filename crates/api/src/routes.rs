@@ -4,8 +4,8 @@ use axum::{
     response::{IntoResponse, Json, Response},
 };
 use covecto_core::{
-    Engine, OptimizeConfig, OptimizePreset, VectorizeConfig, VectorizeRequest,
-    load_image_from_bytes, optimize_svg, vectorize as core_vectorize,
+    Engine, OptimizeConfig, OptimizePreset, OutputFormat, VectorizeConfig, VectorizeRequest,
+    convert_output, load_image_from_bytes, optimize_svg, vectorize as core_vectorize,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -40,7 +40,9 @@ pub async fn metrics(State(state): State<AppState>) -> Json<MetricsResponse> {
 
 #[derive(Deserialize)]
 struct VectorizeParams {
+    format: Option<String>,
     engine: Option<String>,
+    profile: Option<String>,
     optimize: Option<bool>,
     optimize_preset: Option<String>,
     multipass: Option<bool>,
@@ -51,6 +53,7 @@ struct VectorizeParams {
     corner_threshold: Option<i32>,
     splice_threshold: Option<i32>,
     hierarchical: Option<String>,
+    path_simplify: Option<String>,
     layer_difference: Option<i32>,
     length_threshold: Option<f64>,
     max_iterations: Option<usize>,
@@ -68,9 +71,11 @@ pub struct VectorizeResponse {
 pub async fn vectorize_handler(
     State(state): State<AppState>,
     mut multipart: Multipart,
-) -> Result<Json<VectorizeResponse>, AppError> {
+) -> Result<Response, AppError> {
     let mut params = VectorizeParams {
+        format: None,
         engine: None,
+        profile: None,
         optimize: None,
         optimize_preset: None,
         multipass: None,
@@ -81,6 +86,7 @@ pub async fn vectorize_handler(
         corner_threshold: None,
         splice_threshold: None,
         hierarchical: None,
+        path_simplify: None,
         layer_difference: None,
         length_threshold: None,
         max_iterations: None,
@@ -97,17 +103,20 @@ pub async fn vectorize_handler(
         } else {
             let value = field.text().await.map_err(AppError::Multipart)?;
             match name.as_str() {
+                "format" => params.format = Some(value),
                 "engine" => params.engine = Some(value),
                 "optimize" => params.optimize = value.parse().ok(),
                 "optimize_preset" => params.optimize_preset = Some(value),
                 "multipass" => params.multipass = value.parse().ok(),
                 "multipass_iterations" => params.multipass_iterations = value.parse().ok(),
                 "preset" => params.preset = Some(value),
+                "profile" => params.profile = Some(value),
                 "color_precision" => params.color_precision = value.parse().ok(),
                 "filter_speckle" => params.filter_speckle = value.parse().ok(),
                 "corner_threshold" => params.corner_threshold = value.parse().ok(),
                 "splice_threshold" => params.splice_threshold = value.parse().ok(),
                 "hierarchical" => params.hierarchical = Some(value),
+                "path_simplify" => params.path_simplify = Some(value),
                 "layer_difference" => params.layer_difference = value.parse().ok(),
                 "length_threshold" => params.length_threshold = value.parse().ok(),
                 "max_iterations" => params.max_iterations = value.parse().ok(),
@@ -134,7 +143,7 @@ pub async fn vectorize_handler(
         _ => OptimizePreset::Default,
     };
 
-    let config = VectorizeConfig {
+    let mut config = VectorizeConfig {
         engine,
         optimize: params.optimize.unwrap_or(true),
         optimize_config: OptimizeConfig {
@@ -142,16 +151,48 @@ pub async fn vectorize_handler(
             multipass: params.multipass.unwrap_or(false),
             multipass_iterations: params.multipass_iterations.unwrap_or(10),
         },
+        spline_preset: params
+            .preset
+            .as_deref()
+            .map(|s| s.parse())
+            .transpose()
+            .ok()
+            .flatten(),
         color_precision: params.color_precision,
         filter_speckle: params.filter_speckle,
         corner_threshold: params.corner_threshold,
         splice_threshold: params.splice_threshold,
+        color_mode: params
+            .color_mode
+            .as_deref()
+            .map(|s| s.parse())
+            .transpose()
+            .ok()
+            .flatten(),
+        hierarchical: params
+            .hierarchical
+            .as_deref()
+            .map(|s| s.parse())
+            .transpose()
+            .ok()
+            .flatten(),
+        path_simplify_mode: params
+            .path_simplify
+            .as_deref()
+            .map(|s| s.parse())
+            .transpose()
+            .ok()
+            .flatten(),
         layer_difference: params.layer_difference,
         length_threshold: params.length_threshold,
         max_iterations: params.max_iterations,
         path_precision: params.path_precision,
-        ..Default::default()
     };
+
+    // Apply profile preset (overrides individual params)
+    if let Some(ref profile) = params.profile {
+        covecto_core::apply_profile(profile, &mut config);
+    }
 
     let req = VectorizeRequest::new(img).with_config(config);
     let result = core_vectorize(&req).map_err(AppError::Core)?;
@@ -166,11 +207,27 @@ pub async fn vectorize_handler(
         result.metadata.path_count,
     );
 
+    // Non-SVG formats: return raw bytes with content-type header
+    let output_format: OutputFormat = params
+        .format
+        .as_deref()
+        .unwrap_or("svg")
+        .parse::<OutputFormat>()
+        .map_err(|e: covecto_core::Error| AppError::BadRequest(e.to_string()))?;
+
+    if output_format != OutputFormat::Svg {
+        let (bytes, content_type) =
+            convert_output(&result.svg, output_format).map_err(AppError::Core)?;
+        return Ok(([("content-type", content_type.as_str())], bytes).into_response());
+    }
+
+    // Default: JSON with SVG string
     Ok(Json(VectorizeResponse {
         svg: result.svg,
         engine_used: result.engine_used.to_string(),
         metadata: serde_json::to_value(result.metadata).unwrap_or_default(),
-    }))
+    })
+    .into_response())
 }
 #[derive(Serialize)]
 pub struct OptimizeResponse {

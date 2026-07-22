@@ -9,14 +9,17 @@
 mod config;
 mod engine;
 mod error;
+mod export;
 mod optimize;
 
+pub use config::apply_profile;
 pub use config::{
-    ColorMode, Engine, HierarchicalMode, OptimizeConfig, OptimizePreset, OutputFormat,
-    PathSimplifyMode, SplinePreset, VectorizeConfig, VectorizeRequest,
+    ColorMode, Engine, HierarchicalMode, OptimizeConfig, OptimizePreset, PathSimplifyMode,
+    SplinePreset, VectorizeConfig, VectorizeRequest,
 };
 pub use engine::{pixel_exact, spline};
 pub use error::{Error, Result, load_image, load_image_from_bytes};
+pub use export::{OutputFormat, convert_output};
 pub use optimize::optimize_svg;
 
 use image::RgbaImage;
