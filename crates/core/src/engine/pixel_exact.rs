@@ -229,8 +229,7 @@ pub fn vectorize(img: &RgbaImage) -> Result<String> {
 
 fn svg_header(width: u32, height: u32) -> String {
     format!(
-        r#"<svg width="{}" height="{}" xmlns="http://www.w3.org/2000/svg">
-"#,
+        r#"<svg width="{}" height="{}" xmlns="http://www.w3.org/2000/svg">"#,
         width, height
     )
 }

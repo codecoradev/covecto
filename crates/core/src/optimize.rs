@@ -144,57 +144,80 @@ fn remove_empty_groups(s: &str) -> String {
 }
 
 /// Shorten floating point numbers in SVG path data: "1.000" → "1", "2.50" → "2.5".
+/// Only operates within `d="..."` attribute values to avoid corrupting URLs
+/// (e.g. `xmlns="http://www.w3.org/2000/svg"`).
 fn shorten_path_numbers(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let bytes = s.as_bytes();
+    let len = bytes.len();
     let mut i = 0;
 
-    while i < bytes.len() {
-        if bytes[i].is_ascii_digit()
-            || (bytes[i] == b'-' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit())
-        {
-            // Parse number
-            let start = i;
-            if bytes[i] == b'-' {
-                i += 1;
-            }
-            // Integer part
-            while i < bytes.len() && bytes[i].is_ascii_digit() {
-                i += 1;
-            }
-            // Decimal part
-            if i < bytes.len() && bytes[i] == b'.' {
-                i += 1;
-                let decimal_start = i;
-                while i < bytes.len() && bytes[i].is_ascii_digit() {
-                    i += 1;
-                }
-                // Check for 'e' or 'E' (scientific notation)
-                if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
-                    i += 1;
-                    if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+    while i < len {
+        // Look for d="..." attribute — only shorten numbers inside path data
+        if i + 3 < len && bytes[i] == b'd' && bytes[i + 1] == b'=' && bytes[i + 2] == b'"' {
+            // Copy d=" literally
+            result.push_str("d=\"");
+            i += 3;
+
+            // Find closing quote
+            let attr_start = i;
+            let attr_end = match bytes[attr_start..].iter().position(|&b| b == b'"') {
+                Some(pos) => attr_start + pos,
+                None => len,
+            };
+
+            // Process only the attribute value
+            while i < attr_end {
+                if bytes[i].is_ascii_digit()
+                    || (bytes[i] == b'-' && i + 1 < attr_end && bytes[i + 1].is_ascii_digit())
+                {
+                    let start = i;
+                    if bytes[i] == b'-' {
                         i += 1;
                     }
-                    while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    while i < attr_end && bytes[i].is_ascii_digit() {
                         i += 1;
                     }
-                    result.push_str(&s[start..i]);
-                    continue;
-                }
-                // Remove trailing zeros
-                let decimal_end = i;
-                let mut trim_to = decimal_end;
-                while trim_to > decimal_start && bytes[trim_to - 1] == b'0' {
-                    trim_to -= 1;
-                }
-                // If all decimals were zeros, remove the dot too
-                if trim_to == decimal_start {
-                    result.push_str(&s[start..decimal_start - 1]); // skip the dot
+                    if i < attr_end && bytes[i] == b'.' {
+                        i += 1;
+                        let decimal_start = i;
+                        while i < attr_end && bytes[i].is_ascii_digit() {
+                            i += 1;
+                        }
+                        if i < attr_end && (bytes[i] == b'e' || bytes[i] == b'E') {
+                            i += 1;
+                            if i < attr_end && (bytes[i] == b'+' || bytes[i] == b'-') {
+                                i += 1;
+                            }
+                            while i < attr_end && bytes[i].is_ascii_digit() {
+                                i += 1;
+                            }
+                            result.push_str(&s[start..i]);
+                            continue;
+                        }
+                        let decimal_end = i;
+                        let mut trim_to = decimal_end;
+                        while trim_to > decimal_start && bytes[trim_to - 1] == b'0' {
+                            trim_to -= 1;
+                        }
+                        if trim_to == decimal_start {
+                            result.push_str(&s[start..decimal_start - 1]); // skip the dot
+                        } else {
+                            result.push_str(&s[start..trim_to]);
+                        }
+                    } else {
+                        result.push_str(&s[start..i]);
+                    }
                 } else {
-                    result.push_str(&s[start..trim_to]);
+                    result.push(bytes[i] as char);
+                    i += 1;
                 }
-            } else {
-                result.push_str(&s[start..i]);
+            }
+
+            // Copy closing quote
+            if i < len && bytes[i] == b'"' {
+                result.push('"');
+                i += 1;
             }
         } else {
             result.push(bytes[i] as char);
@@ -271,6 +294,16 @@ mod tests {
         let input = r#"<path d="M1.000 2.50 3.140 4.0"/>"#;
         let expected = r#"<path d="M1 2.5 3.14 4"/>"#;
         assert_eq!(shorten_path_numbers(input), expected);
+    }
+
+    #[test]
+    fn test_shorten_numbers_preserves_urls() {
+        // Regression: shorten_path_numbers must NOT strip dots from URLs like xmlns
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100"><path d="M1.0 2.0"/></svg>"#;
+        let result = shorten_path_numbers(input);
+        assert!(result.contains("w3.org"), "URL should not be corrupted: {result}");
+        assert!(result.contains("http://www.w3.org/2000/svg"), "Full URL intact: {result}");
+        assert!(result.contains(r#"d="M1 2""#), "Path numbers should be shortened: {result}");
     }
 
     #[test]
