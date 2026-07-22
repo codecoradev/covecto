@@ -302,11 +302,21 @@ mod tests {
     #[test]
     fn test_shorten_numbers_preserves_urls() {
         // Regression: shorten_path_numbers must NOT strip dots from URLs like xmlns
-        let input = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100"><path d="M1.0 2.0"/></svg>"#;
+        let input =
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="100"><path d="M1.0 2.0"/></svg>"#;
         let result = shorten_path_numbers(input);
-        assert!(result.contains("w3.org"), "URL should not be corrupted: {result}");
-        assert!(result.contains("http://www.w3.org/2000/svg"), "Full URL intact: {result}");
-        assert!(result.contains(r#"d="M1 2""#), "Path numbers should be shortened: {result}");
+        assert!(
+            result.contains("w3.org"),
+            "URL should not be corrupted: {result}"
+        );
+        assert!(
+            result.contains("http://www.w3.org/2000/svg"),
+            "Full URL intact: {result}"
+        );
+        assert!(
+            result.contains(r#"d="M1 2""#),
+            "Path numbers should be shortened: {result}"
+        );
     }
 
     #[test]

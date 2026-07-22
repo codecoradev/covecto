@@ -151,14 +151,38 @@ pub async fn vectorize_handler(
             multipass: params.multipass.unwrap_or(false),
             multipass_iterations: params.multipass_iterations.unwrap_or(10),
         },
-        spline_preset: params.preset.as_deref().map(|s| s.parse()).transpose().ok().flatten(),
+        spline_preset: params
+            .preset
+            .as_deref()
+            .map(|s| s.parse())
+            .transpose()
+            .ok()
+            .flatten(),
         color_precision: params.color_precision,
         filter_speckle: params.filter_speckle,
         corner_threshold: params.corner_threshold,
         splice_threshold: params.splice_threshold,
-        color_mode: params.color_mode.as_deref().map(|s| s.parse()).transpose().ok().flatten(),
-        hierarchical: params.hierarchical.as_deref().map(|s| s.parse()).transpose().ok().flatten(),
-        path_simplify_mode: params.path_simplify.as_deref().map(|s| s.parse()).transpose().ok().flatten(),
+        color_mode: params
+            .color_mode
+            .as_deref()
+            .map(|s| s.parse())
+            .transpose()
+            .ok()
+            .flatten(),
+        hierarchical: params
+            .hierarchical
+            .as_deref()
+            .map(|s| s.parse())
+            .transpose()
+            .ok()
+            .flatten(),
+        path_simplify_mode: params
+            .path_simplify
+            .as_deref()
+            .map(|s| s.parse())
+            .transpose()
+            .ok()
+            .flatten(),
         layer_difference: params.layer_difference,
         length_threshold: params.length_threshold,
         max_iterations: params.max_iterations,
@@ -194,10 +218,7 @@ pub async fn vectorize_handler(
     if output_format != OutputFormat::Svg {
         let (bytes, content_type) =
             convert_output(&result.svg, output_format).map_err(AppError::Core)?;
-        return Ok((
-            [("content-type", content_type.as_str())],
-            bytes,
-        ).into_response());
+        return Ok(([("content-type", content_type.as_str())], bytes).into_response());
     }
 
     // Default: JSON with SVG string
@@ -205,7 +226,8 @@ pub async fn vectorize_handler(
         svg: result.svg,
         engine_used: result.engine_used.to_string(),
         metadata: serde_json::to_value(result.metadata).unwrap_or_default(),
-    }).into_response())
+    })
+    .into_response())
 }
 #[derive(Serialize)]
 pub struct OptimizeResponse {

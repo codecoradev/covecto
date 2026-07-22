@@ -95,11 +95,13 @@ struct VectorizeArgs {
 }
 
 fn parse_engine(s: &str) -> anyhow::Result<Engine> {
-    s.parse::<Engine>().map_err(|e| anyhow::anyhow!(e.to_string()))
+    s.parse::<Engine>()
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
 fn parse_spline_preset(s: &str) -> anyhow::Result<SplinePreset> {
-    s.parse::<SplinePreset>().map_err(|e| anyhow::anyhow!(e.to_string()))
+    s.parse::<SplinePreset>()
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
 fn parse_opt_preset(s: &str) -> OptimizePreset {
@@ -111,15 +113,18 @@ fn parse_opt_preset(s: &str) -> OptimizePreset {
 }
 
 fn parse_color_mode(s: &str) -> anyhow::Result<ColorMode> {
-    s.parse::<ColorMode>().map_err(|e| anyhow::anyhow!(e.to_string()))
+    s.parse::<ColorMode>()
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
 fn parse_hierarchical(s: &str) -> anyhow::Result<HierarchicalMode> {
-    s.parse::<HierarchicalMode>().map_err(|e| anyhow::anyhow!(e.to_string()))
+    s.parse::<HierarchicalMode>()
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
 fn parse_path_simplify(s: &str) -> anyhow::Result<PathSimplifyMode> {
-    s.parse::<PathSimplifyMode>().map_err(|e| anyhow::anyhow!(e.to_string()))
+    s.parse::<PathSimplifyMode>()
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
 fn apply_profile(name: &str, config: &mut VectorizeConfig) {
@@ -160,14 +165,30 @@ impl VectorizeOpts {
                 multipass: self.multipass,
                 multipass_iterations: self.multipass_iterations,
             },
-            spline_preset: self.preset.as_deref().map(parse_spline_preset).transpose()?,
+            spline_preset: self
+                .preset
+                .as_deref()
+                .map(parse_spline_preset)
+                .transpose()?,
             color_precision: self.color_precision,
             filter_speckle: self.filter_speckle,
             corner_threshold: self.corner_threshold,
             splice_threshold: self.splice_threshold,
-            color_mode: self.color_mode.as_deref().map(parse_color_mode).transpose()?,
-            hierarchical: self.hierarchical.as_deref().map(parse_hierarchical).transpose()?,
-            path_simplify_mode: self.path_simplify.as_deref().map(parse_path_simplify).transpose()?,
+            color_mode: self
+                .color_mode
+                .as_deref()
+                .map(parse_color_mode)
+                .transpose()?,
+            hierarchical: self
+                .hierarchical
+                .as_deref()
+                .map(parse_hierarchical)
+                .transpose()?,
+            path_simplify_mode: self
+                .path_simplify
+                .as_deref()
+                .map(parse_path_simplify)
+                .transpose()?,
             layer_difference: self.layer_difference,
             length_threshold: self.length_threshold,
             max_iterations: self.max_iterations,
@@ -191,7 +212,12 @@ fn output_extension(format: &OutputFormat) -> &'static str {
     format.extension()
 }
 
-fn vectorize_single(input: &Path, output: &Path, config: &VectorizeConfig, format: &OutputFormat) -> anyhow::Result<()> {
+fn vectorize_single(
+    input: &Path,
+    output: &Path,
+    config: &VectorizeConfig,
+    format: &OutputFormat,
+) -> anyhow::Result<()> {
     let img = load_image(input)?;
     let req = covecto_core::VectorizeRequest::new(img).with_config(config.clone());
     let result = vectorize(&req)?;
@@ -250,8 +276,7 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
             Some(out) => vectorize_single(input, out, &config, &format)?,
             None => {
                 let img = load_image(input)?;
-                let req =
-                    covecto_core::VectorizeRequest::new(img).with_config(config.clone());
+                let req = covecto_core::VectorizeRequest::new(img).with_config(config.clone());
                 let result = vectorize(&req)?;
                 let (bytes, _ct) = convert_output(&result.svg, format)?;
                 std::io::Write::write_all(&mut std::io::stdout(), &bytes)?;

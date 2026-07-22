@@ -33,7 +33,11 @@ fn svg_to_pixels(svg: &str) -> Option<image::RgbaImage> {
 
 /// Compute mean absolute error between two images of the same size.
 fn mae(img1: &image::RgbaImage, img2: &image::RgbaImage) -> f64 {
-    assert_eq!(img1.dimensions(), img2.dimensions(), "image dimensions must match");
+    assert_eq!(
+        img1.dimensions(),
+        img2.dimensions(),
+        "image dimensions must match"
+    );
     let (w, h) = img1.dimensions();
     let total = (w as f64) * (h as f64) * 4.0;
     let mut sum: u64 = 0;
@@ -58,7 +62,8 @@ fn check_visual_match(fixture: &str, engine: Engine, max_mae: f64) {
             ..Default::default()
         })
         .with_engine(engine);
-    let result = vectorize(&req).unwrap_or_else(|e| panic!("vectorize failed for {fixture} with {engine:?}: {e}"));
+    let result = vectorize(&req)
+        .unwrap_or_else(|e| panic!("vectorize failed for {fixture} with {engine:?}: {e}"));
 
     // SVG must contain valid content
     assert!(result.svg.contains("<svg"), "SVG missing <svg> tag");
@@ -70,7 +75,8 @@ fn check_visual_match(fixture: &str, engine: Engine, max_mae: f64) {
 
     let (rend_w, rend_h) = rendered.dimensions();
     assert_eq!(
-        (orig_w, orig_h), (rend_w, rend_h),
+        (orig_w, orig_h),
+        (rend_w, rend_h),
         "rendered dimensions mismatch for {fixture}: expected {orig_w}x{orig_h}, got {rend_w}x{rend_h}"
     );
 

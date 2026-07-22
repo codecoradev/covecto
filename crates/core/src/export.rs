@@ -50,7 +50,10 @@ impl OutputFormat {
 /// Returns the converted bytes and the MIME content type.
 pub fn convert_output(svg: &str, format: OutputFormat) -> Result<(Vec<u8>, String)> {
     match format {
-        OutputFormat::Svg => Ok((svg.as_bytes().to_vec(), OutputFormat::Svg.content_type().to_string())),
+        OutputFormat::Svg => Ok((
+            svg.as_bytes().to_vec(),
+            OutputFormat::Svg.content_type().to_string(),
+        )),
         OutputFormat::Pdf => {
             let pdf_bytes = svg_to_pdf(svg)?;
             Ok((pdf_bytes, OutputFormat::Pdf.content_type().to_string()))
@@ -151,7 +154,7 @@ fn render_path(path: &usvg::Path, ps: &mut String) {
             }
             PathSegment::QuadTo(_p1, p) => {
                 // PostScript doesn't have native quad curves; convert to cubic
-                // Quadratic Bézier (Q) → Cubic Bézier (C): 
+                // Quadratic Bézier (Q) → Cubic Bézier (C):
                 // CP1 = 1/3 P0 + 2/3 P1, CP2 = 2/3 P1 + 1/3 P2
                 // We approximate by using the last moveto/line position as P0.
                 // For simplicity, we just emit a line (lossy but functional).

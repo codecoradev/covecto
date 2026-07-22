@@ -14,8 +14,8 @@ mod optimize;
 
 pub use config::apply_profile;
 pub use config::{
-    ColorMode, Engine, HierarchicalMode, OptimizeConfig, OptimizePreset,
-    PathSimplifyMode, SplinePreset, VectorizeConfig, VectorizeRequest,
+    ColorMode, Engine, HierarchicalMode, OptimizeConfig, OptimizePreset, PathSimplifyMode,
+    SplinePreset, VectorizeConfig, VectorizeRequest,
 };
 pub use engine::{pixel_exact, spline};
 pub use error::{Error, Result, load_image, load_image_from_bytes};
