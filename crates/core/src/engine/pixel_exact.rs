@@ -11,6 +11,22 @@ use std::fmt::Write;
 
 /// Vectorize an image using pixel-exact algorithm.
 pub fn vectorize(img: &RgbaImage) -> Result<String> {
+    let mut buf = Vec::with_capacity((img.width() * img.height() * 3) as usize);
+    vectorize_to(&mut buf, img)?;
+    // SVG output is always valid UTF-8 (ASCII path commands + hex colors)
+    Ok(unsafe { String::from_utf8_unchecked(buf) })
+}
+
+/// Metadata returned by streaming vectorize (without the SVG string).
+#[derive(Debug, Clone)]
+pub struct VectorizeMeta {
+    pub byte_count: usize,
+    pub path_count: usize,
+}
+
+/// Vectorize an image using pixel-exact algorithm, writing SVG directly to a writer.
+/// This avoids building the full SVG string in memory.
+pub fn vectorize_to<W: std::io::Write>(writer: &mut W, img: &RgbaImage) -> Result<VectorizeMeta> {
     let width = img.width();
     let height = img.height();
     let raw = img.as_raw();
@@ -188,44 +204,61 @@ pub fn vectorize(img: &RgbaImage) -> Result<String> {
         }
     }
 
-    // Assemble SVG
-    let mut svg = String::with_capacity((width * height * 3) as usize);
-    svg.push_str(&svg_header(width, height));
+    // Stream SVG output
+    let mut byte_count = 0usize;
+    let mut path_count = 0usize;
+
+    // SVG header
+    let header = svg_header(width, height);
+    byte_count += header.len();
+    writer.write_all(header.as_bytes())?;
 
     // Group translucent paths by alpha
     let mut translucent_by_alpha: BTreeMap<u8, Vec<([u8; 4], String)>> = BTreeMap::new();
 
-    for (color, (data, _)) in paths_by_color {
-        let [r, g, b, a] = color;
+    for (color, (data, _)) in &paths_by_color {
+        let [r, g, b, a] = *color;
+        path_count += 1;
         if a == 255 {
-            let _ = write!(
-                svg,
+            let line = format!(
                 r##"<path fill="#{:02x}{:02x}{:02x}" d="{}"/>"##,
                 r, g, b, data
             );
+            byte_count += line.len();
+            writer.write_all(line.as_bytes())?;
         } else {
             translucent_by_alpha
                 .entry(a)
                 .or_default()
-                .push((color, data));
+                .push((*color, data.clone()));
         }
     }
 
     for (a, paths) in &translucent_by_alpha {
         let opacity = f32::from(*a) / 255.0;
-        let _ = write!(svg, r##"<g fill-opacity="{:.3}">"##, opacity);
+        let open = format!(r#"<g fill-opacity="{:.3}">"#, opacity);
+        byte_count += open.len();
+        writer.write_all(open.as_bytes())?;
         for ([r, g, b, _], data) in paths {
-            let _ = write!(
-                svg,
+            let line = format!(
                 r##"<path fill="#{:02x}{:02x}{:02x}" d="{}"/>"##,
                 r, g, b, data
             );
+            byte_count += line.len();
+            writer.write_all(line.as_bytes())?;
+            path_count += 1;
         }
-        svg.push_str("</g>");
+        byte_count += 4; // </g>
+        writer.write_all(b"</g>")?;
     }
 
-    svg.push_str("</svg>\n");
-    Ok(svg)
+    byte_count += 6; // </svg>\n
+    writer.write_all(b"</svg>\n")?;
+
+    Ok(VectorizeMeta {
+        byte_count,
+        path_count,
+    })
 }
 
 fn svg_header(width: u32, height: u32) -> String {

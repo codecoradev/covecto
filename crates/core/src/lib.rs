@@ -105,6 +105,15 @@ fn count_svg_paths(svg: &str) -> usize {
     svg.matches("<path").count()
 }
 
+/// Streaming vectorize metadata (returned instead of the full SVG string).
+#[derive(Debug, Clone)]
+pub struct StreamResult {
+    /// Which engine was used.
+    pub engine_used: Engine,
+    /// Metadata about the operation.
+    pub metadata: ResultMetadata,
+}
+
 /// Main vectorization entry point.
 pub fn vectorize(request: &VectorizeRequest) -> Result<VectorizeResult> {
     let engine = match request.config.engine {
@@ -146,6 +155,53 @@ pub fn vectorize(request: &VectorizeRequest) -> Result<VectorizeResult> {
             compression_ratio,
         },
         svg,
+    })
+}
+
+/// Streaming vectorization — writes SVG directly to a writer instead of returning a String.
+/// For PixelExact: SVG is written incrementally during assembly.
+/// For Spline: vtracer builds in memory, but result is written directly to the writer.
+pub fn vectorize_to<W: std::io::Write>(
+    writer: &mut W,
+    request: &VectorizeRequest,
+) -> Result<StreamResult> {
+    let engine = match request.config.engine {
+        Engine::Auto => auto_select_engine(&request.image),
+        other => other,
+    };
+
+    let start = Instant::now();
+    let (w, h) = (request.image.width(), request.image.height());
+    let raw_pixel_bytes = (w as usize * h as usize) * 4;
+
+    let (svg_byte_size, path_count) = match engine {
+        Engine::PixelExact => {
+            let m = pixel_exact::vectorize_to(writer, &request.image)?;
+            (m.byte_count, m.path_count)
+        }
+        Engine::Spline => {
+            let m = spline::vectorize_to(writer, &request.image, &request.config)?;
+            (m.byte_count, m.path_count)
+        }
+        Engine::Auto => unreachable!(),
+    };
+
+    let elapsed = start.elapsed();
+    let compression_ratio = if raw_pixel_bytes > 0 {
+        svg_byte_size as f64 / raw_pixel_bytes as f64
+    } else {
+        1.0
+    };
+
+    Ok(StreamResult {
+        engine_used: engine,
+        metadata: ResultMetadata {
+            input_size: (w, h),
+            svg_byte_size,
+            path_count,
+            processing_time_ms: elapsed.as_millis() as u64,
+            compression_ratio,
+        },
     })
 }
 
