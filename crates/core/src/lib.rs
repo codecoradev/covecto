@@ -15,6 +15,7 @@ pub use config::{
     ColorMode, Engine, HierarchicalMode, OptimizeConfig, OptimizePreset, OutputFormat,
     PathSimplifyMode, SplinePreset, VectorizeConfig, VectorizeRequest,
 };
+pub use config::apply_profile;
 pub use engine::{pixel_exact, spline};
 pub use error::{Error, Result, load_image, load_image_from_bytes};
 pub use optimize::optimize_svg;
