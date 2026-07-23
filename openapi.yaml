@@ -1,0 +1,297 @@
+openapi: 3.1.0
+info:
+  title: Covecto API
+  version: 0.1.0
+  description: Dual-engine image vectorization — pixel-exact for icons, smooth curves for art.
+  license:
+    name: MIT
+    url: https://github.com/codecoradev/covecto/blob/main/LICENSE
+
+servers:
+  - url: http://localhost:3000
+    description: Local development
+
+paths:
+  /v1/health:
+    get:
+      operationId: health
+      summary: Health check
+      tags: [System]
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, version]
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  version:
+                    type: string
+                    example: "0.1.0"
+
+  /v1/metrics:
+    get:
+      operationId: metrics
+      summary: Request metrics
+      tags: [System]
+      responses:
+        '200':
+          description: Server metrics since startup
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [request_count, avg_processing_ms]
+                properties:
+                  request_count:
+                    type: integer
+                    description: Total requests processed
+                    example: 42
+                  avg_processing_ms:
+                    type: number
+                    format: float
+                    description: Average processing time in milliseconds
+                    example: 23.5
+
+  /v1/vectorize:
+    post:
+      operationId: vectorize
+      summary: Vectorize an image to SVG (or PDF/EPS)
+      tags: [Vectorization]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Input image (PNG, JPEG, WebP, BMP, GIF, TIFF)
+                engine:
+                  type: string
+                  enum: [auto, spline, pixel-exact]
+                  default: auto
+                  description: |
+                    Vectorization engine.
+                    `auto` selects based on image characteristics.
+                format:
+                  type: string
+                  enum: [svg, pdf, eps]
+                  default: svg
+                  description: Output format. Non-SVG formats return raw binary with appropriate content-type.
+                preset:
+                  type: string
+                  enum: [bw, poster, photo]
+                  description: vtracer preset (overrides individual params)
+                profile:
+                  type: string
+                  enum: [icon, logo, photo, lineart]
+                  description: Custom preset that tunes multiple params at once
+                optimize:
+                  type: boolean
+                  default: true
+                  description: Run SVG optimization after vectorization
+                optimize_preset:
+                  type: string
+                  enum: [default, safe, none]
+                  default: default
+                  description: Optimization aggressiveness
+                multipass:
+                  type: boolean
+                  default: false
+                  description: Run multiple optimization passes
+                multipass_iterations:
+                  type: integer
+                  default: 10
+                  minimum: 1
+                  description: Number of multipass iterations
+                color_precision:
+                  type: integer
+                  minimum: 1
+                  maximum: 32
+                  description: Color quantization precision (higher = more colors)
+                filter_speckle:
+                  type: integer
+                  minimum: 0
+                  description: Filter speckle noise smaller than this size
+                corner_threshold:
+                  type: integer
+                  minimum: 0
+                  maximum: 180
+                  description: Corner detection threshold (higher = fewer corners)
+                splice_threshold:
+                  type: integer
+                  minimum: 0
+                  maximum: 100
+                  description: Path splice threshold
+                color_mode:
+                  type: string
+                  enum: [color, binary]
+                  description: Color quantization mode
+                hierarchical:
+                  type: string
+                  enum: [stacked, cutout]
+                  description: Hierarchical layering mode
+                path_simplify:
+                  type: string
+                  enum: [spline, polygon, none]
+                  description: Path simplification algorithm
+                layer_difference:
+                  type: integer
+                  description: Layer difference threshold
+                length_threshold:
+                  type: number
+                  format: float
+                  minimum: 0
+                  description: Minimum path length
+                max_iterations:
+                  type: integer
+                  minimum: 1
+                  description: Max color quantization iterations
+                path_precision:
+                  type: integer
+                  minimum: 0
+                  description: Path coordinate precision (decimal places)
+      responses:
+        '200':
+          description: Vectorization successful
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [svg, engine_used, metadata]
+                properties:
+                  svg:
+                    type: string
+                    description: SVG output (returned as JSON string when format=svg)
+                  engine_used:
+                    type: string
+                    enum: [auto, spline, pixel-exact]
+                    description: Which engine was actually used
+                  metadata:
+                    $ref: '#/components/schemas/VectorizeMetadata'
+            application/pdf:
+              description: PDF output (when format=pdf)
+            application/postscript:
+              description: EPS output (when format=eps)
+        '400':
+          description: Bad request (missing file, invalid params)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal error (image loading, vectorization failure)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/optimize:
+    post:
+      operationId: optimize
+      summary: Optimize an existing SVG
+      tags: [Optimization]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: SVG file to optimize
+                preset:
+                  type: string
+                  enum: [default, safe, none]
+                  default: default
+                  description: Optimization aggressiveness
+                multipass:
+                  type: boolean
+                  default: false
+                  description: Run multiple optimization passes
+                multipass_iterations:
+                  type: integer
+                  default: 10
+                  minimum: 1
+                  description: Number of multipass iterations
+      responses:
+        '200':
+          description: Optimization successful
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [svg, original_size, optimized_size, reduction_pct]
+                properties:
+                  svg:
+                    type: string
+                    description: Optimized SVG content
+                  original_size:
+                    type: integer
+                    description: Original SVG size in bytes
+                    example: 15240
+                  optimized_size:
+                    type: integer
+                    description: Optimized SVG size in bytes
+                    example: 8120
+                  reduction_pct:
+                    type: number
+                    format: float
+                    description: Size reduction percentage
+                    example: 46.7
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  schemas:
+    VectorizeMetadata:
+      type: object
+      description: Metadata about the vectorization result
+      properties:
+        input_size:
+          type: array
+          items:
+            type: integer
+          description: Input image dimensions [width, height]
+          example: [128, 128]
+        svg_byte_size:
+          type: integer
+          description: Output SVG size in bytes
+          example: 4520
+        path_count:
+          type: integer
+          description: Number of SVG paths generated
+          example: 24
+        processing_time_ms:
+          type: number
+          format: float
+          description: Processing time in milliseconds
+          example: 12.3
+        engine_used:
+          type: string
+          description: Engine that was used
+          example: spline
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Error message
+          example: "No file provided"
