@@ -22,3 +22,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
+indicatif = { workspace = true }
+walkdir = { workspace = true }
+glob = { workspace = true }
+image = { workspace = true }
+rayon = { workspace = true }

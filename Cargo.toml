@@ -30,6 +30,7 @@ axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors", "limit", "trace"] }
 tower = "0.5"
+http-body-util = "0.1"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -46,7 +47,12 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# File discovery
+walkdir = "2"
+glob = "0.3"
 
+# Progress
+indicatif = "0.17"
 
 [profile.release]
 lto = "fat"

@@ -36,13 +36,6 @@ impl std::str::FromStr for Engine {
     }
 }
 
-/// Output format for the vectorized result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum OutputFormat {
-    #[default]
-    Svg,
-}
-
 /// Optimization configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OptimizeConfig {
@@ -150,6 +143,64 @@ pub enum ColorMode {
     Binary,
 }
 
+impl std::str::FromStr for ColorMode {
+    type Err = crate::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "color" => Ok(ColorMode::Color),
+            "binary" | "bw" => Ok(ColorMode::Binary),
+            _ => Err(crate::Error::InvalidConfig(format!(
+                "Unknown color mode: {s}"
+            ))),
+        }
+    }
+}
+
+impl std::str::FromStr for HierarchicalMode {
+    type Err = crate::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "stacked" => Ok(HierarchicalMode::Stacked),
+            "cutout" => Ok(HierarchicalMode::Cutout),
+            _ => Err(crate::Error::InvalidConfig(format!(
+                "Unknown hierarchical mode: {s}"
+            ))),
+        }
+    }
+}
+
+impl std::str::FromStr for PathSimplifyMode {
+    type Err = crate::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "spline" => Ok(PathSimplifyMode::Spline),
+            "polygon" => Ok(PathSimplifyMode::Polygon),
+            "none" => Ok(PathSimplifyMode::None),
+            _ => Err(crate::Error::InvalidConfig(format!(
+                "Unknown path simplify mode: {s}"
+            ))),
+        }
+    }
+}
+
+impl std::str::FromStr for SplinePreset {
+    type Err = crate::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "bw" => Ok(SplinePreset::Bw),
+            "poster" => Ok(SplinePreset::Poster),
+            "photo" => Ok(SplinePreset::Photo),
+            _ => Err(crate::Error::InvalidConfig(format!(
+                "Unknown spline preset: {s}"
+            ))),
+        }
+    }
+}
+
 impl Default for VectorizeConfig {
     fn default() -> Self {
         Self {
@@ -215,5 +266,65 @@ impl VectorizeRequest {
     pub fn with_config(mut self, config: VectorizeConfig) -> Self {
         self.config = config;
         self
+    }
+}
+
+/// Apply a named profile preset to a vectorization config.
+///
+/// Profiles override individual vtracer parameters. Useful presets:
+/// - `icon` — optimized for small icons (32×32), high detail preservation
+/// - `logo` — optimized for logos, high corner threshold, cutout hierarchical
+/// - `photo` — optimized for photos, lower precision, stacked hierarchical
+/// - `lineart` — optimized for line drawings, binary color mode
+pub fn apply_profile(name: &str, config: &mut VectorizeConfig) {
+    match name.to_lowercase().as_str() {
+        "icon" => {
+            config.engine = Engine::Spline;
+            config.color_precision = Some(4);
+            config.filter_speckle = Some(2);
+            config.corner_threshold = Some(80);
+            config.splice_threshold = Some(30);
+            config.color_mode = Some(ColorMode::Color);
+            config.path_simplify_mode = Some(PathSimplifyMode::Spline);
+            config.layer_difference = Some(10);
+            config.max_iterations = Some(4);
+        }
+        "logo" => {
+            config.engine = Engine::Spline;
+            config.color_precision = Some(8);
+            config.filter_speckle = Some(4);
+            config.corner_threshold = Some(90);
+            config.splice_threshold = Some(45);
+            config.color_mode = Some(ColorMode::Color);
+            config.path_simplify_mode = Some(PathSimplifyMode::Spline);
+            config.hierarchical = Some(HierarchicalMode::Cutout);
+            config.layer_difference = Some(5);
+            config.max_iterations = Some(4);
+        }
+        "photo" => {
+            config.engine = Engine::Spline;
+            config.color_precision = Some(10);
+            config.filter_speckle = Some(4);
+            config.corner_threshold = Some(40);
+            config.splice_threshold = Some(45);
+            config.color_mode = Some(ColorMode::Color);
+            config.path_simplify_mode = Some(PathSimplifyMode::Spline);
+            config.hierarchical = Some(HierarchicalMode::Stacked);
+            config.layer_difference = Some(5);
+            config.max_iterations = Some(2);
+        }
+        "lineart" => {
+            config.engine = Engine::Spline;
+            config.color_precision = Some(2);
+            config.filter_speckle = Some(8);
+            config.corner_threshold = Some(30);
+            config.splice_threshold = Some(60);
+            config.color_mode = Some(ColorMode::Binary);
+            config.path_simplify_mode = Some(PathSimplifyMode::Spline);
+            config.hierarchical = Some(HierarchicalMode::Cutout);
+            config.layer_difference = Some(10);
+            config.max_iterations = Some(2);
+        }
+        _ => {} // Unknown profile silently ignored
     }
 }

@@ -4,6 +4,9 @@ pub enum Error {
     #[error("Invalid engine: {0}")]
     InvalidEngine(String),
 
+    #[error("Invalid config: {0}")]
+    InvalidConfig(String),
+
     #[error("Image decode error: {0}")]
     ImageDecode(#[from] image::ImageError),
 
@@ -29,6 +32,9 @@ pub enum Error {
 
     #[error("Invalid request: {0}")]
     BadRequest(String),
+
+    #[error("Conversion error: {0}")]
+    Conversion(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

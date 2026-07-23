@@ -1,10 +1,18 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use clap::{Parser, Subcommand};
 use covecto_core::{
-    Engine, OptimizeConfig, OptimizePreset, SplinePreset, VectorizeConfig, load_image,
-    optimize_svg, vectorize,
+    ColorMode, Engine, HierarchicalMode, OptimizeConfig, OptimizePreset, OutputFormat,
+    PathSimplifyMode, SplinePreset, VectorizeConfig, convert_output, load_image, vectorize,
+    vectorize_to,
 };
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use rayon::prelude::*;
+use serde::Serialize;
+use std::io::Write;
 use tracing::info;
 
 /// Covecto — Cora Vectorizer. Dual-engine image-to-SVG vectorization.
@@ -18,32 +26,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Vectorize one or more images to SVG
-    Vectorize {
-        /// Input file or directory
-        #[arg(value_name = "INPUT")]
-        input: PathBuf,
-        /// Output file or directory (default: stdout / INPUT/vectorized/)
-        #[arg(short, long)]
-        output: Option<PathBuf>,
-        /// Engine: auto, spline, pixel-exact (default: auto)
-        #[arg(short, long, default_value = "auto")]
-        engine: String,
-        /// Spline preset: bw, poster, photo (overrides individual params)
-        #[arg(long)]
-        preset: Option<String>,
-        /// Run SVG optimization after vectorization
-        #[arg(long, default_value = "true")]
-        optimize: bool,
-        /// Optimization preset: default, safe, none
-        #[arg(long, default_value = "default")]
-        optimize_preset: String,
-        /// Run multiple optimization passes
-        #[arg(long)]
-        multipass: bool,
-        /// Number of multipass iterations (default: 10)
-        #[arg(long, default_value = "10")]
-        multipass_iterations: usize,
-    },
+    Vectorize(Box<VectorizeArgs>),
     /// Start HTTP API server
     Serve {
         /// Port to listen on (default: 3000)
@@ -52,22 +35,102 @@ enum Commands {
     },
 }
 
+#[derive(clap::Args)]
+struct VectorizeArgs {
+    /// Input file, directory, or glob pattern (e.g. "icons/*.png")
+    #[arg(value_name = "INPUT")]
+    input: PathBuf,
+    /// Output file (single) or directory (batch)
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    /// Output directory for batch mode (alternative to --output)
+    #[arg(long)]
+    output_dir: Option<PathBuf>,
+    /// Output filename template with {stem} and {ext} placeholders (default: "{stem}.{ext}")
+    #[arg(long)]
+    output_template: Option<String>,
+    /// Output format: svg, pdf, eps (default: svg)
+    #[arg(short = 'F', long, default_value = "svg")]
+    format: String,
+    /// Engine: auto, spline, pixel-exact (default: auto)
+    #[arg(short, long, default_value = "auto")]
+    engine: String,
+    /// vtracer preset: bw, poster, photo (overrides individual params)
+    #[arg(long)]
+    preset: Option<String>,
+    /// Custom preset: icon, logo, photo, lineart (overrides individual params)
+    #[arg(long)]
+    profile: Option<String>,
+    /// Color quantization precision (1-32, higher = more colors)
+    #[arg(long)]
+    color_precision: Option<i32>,
+    /// Filter speckle noise smaller than this size
+    #[arg(long)]
+    filter_speckle: Option<usize>,
+    /// Corner detection threshold (0-180, higher = fewer corners)
+    #[arg(long)]
+    corner_threshold: Option<i32>,
+    /// Path splice threshold (0-100)
+    #[arg(long)]
+    splice_threshold: Option<i32>,
+    /// Color mode: color, binary
+    #[arg(long)]
+    color_mode: Option<String>,
+    /// Hierarchical mode: stacked, cutout
+    #[arg(long)]
+    hierarchical: Option<String>,
+    /// Path simplification: spline, polygon, none
+    #[arg(long)]
+    path_simplify: Option<String>,
+    /// Layer difference threshold
+    #[arg(long)]
+    layer_difference: Option<i32>,
+    /// Minimum path length
+    #[arg(long)]
+    length_threshold: Option<f64>,
+    /// Max color quantization iterations
+    #[arg(long)]
+    max_iterations: Option<usize>,
+    /// Path coordinate precision (decimal places)
+    #[arg(long)]
+    path_precision: Option<u32>,
+    /// Run SVG optimization after vectorization
+    #[arg(long, default_value = "true")]
+    optimize: bool,
+    /// Optimization preset: default, safe, none
+    #[arg(long, default_value = "default")]
+    optimize_preset: String,
+    /// Run multiple optimization passes
+    #[arg(long)]
+    multipass: bool,
+    /// Number of multipass iterations (default: 10)
+    #[arg(long, default_value = "10")]
+    multipass_iterations: usize,
+    /// Recursively scan input directories
+    #[arg(short = 'R', long)]
+    recursive: bool,
+    /// Output results as JSON to stdout (files still written to disk)
+    #[arg(long)]
+    json: bool,
+    /// Pretty-print JSON output
+    #[arg(long)]
+    json_pretty: bool,
+    /// Disable progress bar / spinner
+    #[arg(long)]
+    no_progress: bool,
+    /// Preview what would be processed without actually vectorizing
+    #[arg(long)]
+    dry_run: bool,
+}
+
 fn parse_engine(s: &str) -> anyhow::Result<Engine> {
-    match s.to_lowercase().as_str() {
-        "auto" => Ok(Engine::Auto),
-        "spline" => Ok(Engine::Spline),
-        "pixel-exact" | "pixel_exact" => Ok(Engine::PixelExact),
-        _ => anyhow::bail!("Unknown engine: {s}. Use: auto, spline, pixel-exact"),
-    }
+    s.parse::<Engine>()
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
 fn parse_spline_preset(s: &str) -> anyhow::Result<SplinePreset> {
-    match s.to_lowercase().as_str() {
-        "bw" => Ok(SplinePreset::Bw),
-        "poster" => Ok(SplinePreset::Poster),
-        "photo" => Ok(SplinePreset::Photo),
-        _ => anyhow::bail!("Unknown preset: {s}. Use: bw, poster, photo"),
-    }
+    s.parse::<SplinePreset>()
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
 fn parse_opt_preset(s: &str) -> OptimizePreset {
@@ -78,111 +141,240 @@ fn parse_opt_preset(s: &str) -> OptimizePreset {
     }
 }
 
+fn parse_color_mode(s: &str) -> anyhow::Result<ColorMode> {
+    s.parse::<ColorMode>()
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+fn parse_hierarchical(s: &str) -> anyhow::Result<HierarchicalMode> {
+    s.parse::<HierarchicalMode>()
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+fn parse_path_simplify(s: &str) -> anyhow::Result<PathSimplifyMode> {
+    s.parse::<PathSimplifyMode>()
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+fn apply_profile(name: &str, config: &mut VectorizeConfig) {
+    covecto_core::apply_profile(name, config);
+}
+
 #[derive(Clone)]
 struct VectorizeOpts {
     output: Option<PathBuf>,
+    output_dir: Option<PathBuf>,
+    output_template: Option<String>,
+    format: String,
     engine: String,
     preset: Option<String>,
+    profile: Option<String>,
+    color_precision: Option<i32>,
+    filter_speckle: Option<usize>,
+    corner_threshold: Option<i32>,
+    splice_threshold: Option<i32>,
+    color_mode: Option<String>,
+    hierarchical: Option<String>,
+    path_simplify: Option<String>,
+    layer_difference: Option<i32>,
+    length_threshold: Option<f64>,
+    max_iterations: Option<usize>,
+    path_precision: Option<u32>,
     optimize: bool,
     optimize_preset: String,
     multipass: bool,
     multipass_iterations: usize,
+    recursive: bool,
+    json: bool,
+    json_pretty: bool,
+    no_progress: bool,
+    dry_run: bool,
 }
 
 impl VectorizeOpts {
     fn to_config(&self) -> anyhow::Result<VectorizeConfig> {
-        let engine = parse_engine(&self.engine)?;
-        let spline_preset = self
-            .preset
-            .as_deref()
-            .map(parse_spline_preset)
-            .transpose()?;
-        let opt_preset = parse_opt_preset(&self.optimize_preset);
-        Ok(VectorizeConfig {
-            engine,
+        let mut config = VectorizeConfig {
+            engine: parse_engine(&self.engine)?,
             optimize: self.optimize,
             optimize_config: OptimizeConfig {
-                preset: opt_preset,
+                preset: parse_opt_preset(&self.optimize_preset),
                 multipass: self.multipass,
                 multipass_iterations: self.multipass_iterations,
             },
-            spline_preset,
-            ..Default::default()
-        })
+            spline_preset: self
+                .preset
+                .as_deref()
+                .map(parse_spline_preset)
+                .transpose()?,
+            color_precision: self.color_precision,
+            filter_speckle: self.filter_speckle,
+            corner_threshold: self.corner_threshold,
+            splice_threshold: self.splice_threshold,
+            color_mode: self
+                .color_mode
+                .as_deref()
+                .map(parse_color_mode)
+                .transpose()?,
+            hierarchical: self
+                .hierarchical
+                .as_deref()
+                .map(parse_hierarchical)
+                .transpose()?,
+            path_simplify_mode: self
+                .path_simplify
+                .as_deref()
+                .map(parse_path_simplify)
+                .transpose()?,
+            layer_difference: self.layer_difference,
+            length_threshold: self.length_threshold,
+            max_iterations: self.max_iterations,
+            path_precision: self.path_precision,
+        };
+
+        if let Some(ref profile) = self.profile {
+            apply_profile(profile, &mut config);
+        }
+
+        Ok(config)
     }
 }
 
-fn vectorize_single(input: &Path, output: &Path, config: &VectorizeConfig) -> anyhow::Result<()> {
+fn parse_output_format(s: &str) -> anyhow::Result<OutputFormat> {
+    s.parse::<OutputFormat>()
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+fn output_extension(format: &OutputFormat) -> &'static str {
+    format.extension()
+}
+
+/// Machine-readable JSON output for scripting.
+#[derive(Serialize)]
+struct JsonResult {
+    path: String,
+    output: String,
+    engine: String,
+    format: String,
+    bytes: usize,
+    paths: usize,
+    time_ms: u64,
+    input_size: (u32, u32),
+    compression_ratio: f64,
+}
+
+impl JsonResult {
+    fn from_result(
+        input: &Path,
+        output: &Path,
+        result: &covecto_core::VectorizeResult,
+        format: &OutputFormat,
+        output_bytes: usize,
+    ) -> Self {
+        Self {
+            path: input.display().to_string(),
+            output: output.display().to_string(),
+            engine: result.engine_used.to_string(),
+            format: format.extension().to_string(),
+            bytes: output_bytes,
+            paths: result.metadata.path_count,
+            time_ms: result.metadata.processing_time_ms,
+            input_size: result.metadata.input_size,
+            compression_ratio: result.metadata.compression_ratio,
+        }
+    }
+}
+
+/// Build output filename from template, stem, and extension.
+fn apply_output_template(template: &str, stem: &str, ext: &str) -> String {
+    template.replace("{stem}", stem).replace("{ext}", ext)
+}
+
+/// Vectorize a single file and optionally write output.
+/// Returns the result and output bytes for JSON reporting.
+/// Uses streaming I/O for SVG output to avoid holding full SVG in memory.
+fn vectorize_single_raw(
+    input: &Path,
+    output: Option<&Path>,
+    config: &VectorizeConfig,
+    format: &OutputFormat,
+) -> anyhow::Result<(covecto_core::VectorizeResult, usize, PathBuf)> {
     let img = load_image(input)?;
     let req = covecto_core::VectorizeRequest::new(img).with_config(config.clone());
-    let result = vectorize(&req)?;
 
-    let svg = if config.optimize {
-        optimize_svg(&result.svg, &config.optimize_config)?
-    } else {
-        result.svg
+    let out_path = match output {
+        Some(p) => p.to_path_buf(),
+        None => {
+            let stem = input.file_stem().unwrap().to_string_lossy().to_string();
+            let ext = format.extension();
+            input
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(format!("{stem}.{ext}"))
+        }
     };
 
-    if let Some(parent) = output.parent() {
+    if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(output, &svg)?;
+
+    let (bytes, result) = if *format == OutputFormat::Svg {
+        // Streaming path: write SVG directly to file via BufWriter
+        let file = std::fs::File::create(&out_path)?;
+        let mut writer = std::io::BufWriter::new(file);
+        let stream_result = vectorize_to(&mut writer, &req)?;
+        writer.flush()?;
+        let svg_bytes = stream_result.metadata.svg_byte_size;
+        // Wrap in VectorizeResult for JSON reporting
+        let result = covecto_core::VectorizeResult {
+            svg: String::new(), // not needed for file output
+            engine_used: stream_result.engine_used,
+            metadata: stream_result.metadata,
+        };
+        (svg_bytes, result)
+    } else {
+        // Non-SVG formats need the String for convert_output
+        let result = vectorize(&req)?;
+        let (bytes, _content_type) = convert_output(&result.svg, *format)?;
+        std::fs::write(&out_path, &bytes)?;
+        (bytes.len(), result)
+    };
+
     info!(
-        "✓ {} → {} ({}ms, {} bytes, {} paths, engine={})",
+        "✓ {} → {} ({}ms, {} bytes, {} paths, engine={}, format={})",
         input.display(),
-        output.display(),
+        out_path.display(),
         result.metadata.processing_time_ms,
-        svg.len(),
+        bytes,
         result.metadata.path_count,
         result.engine_used,
+        format.extension(),
     );
-    Ok(())
+
+    Ok((result, bytes, out_path))
 }
 
-fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
-    let config = opts.to_config()?;
+fn make_spinner(msg: &str) -> ProgressBar {
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.cyan} {msg}")
+            .unwrap(),
+    );
+    spinner.set_message(msg.to_string());
+    spinner
+}
 
-    if input.is_dir() {
-        let out_dir = opts
-            .output
-            .clone()
-            .unwrap_or_else(|| input.join("vectorized"));
-        std::fs::create_dir_all(&out_dir)?;
-        let mut count = 0u32;
-        let mut errors = 0u32;
-        for entry in std::fs::read_dir(input)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_file() && is_image_file(&path) {
-                let stem = path.file_stem().unwrap().to_string_lossy().to_string();
-                let out_path = out_dir.join(format!("{stem}.svg"));
-                match vectorize_single(&path, &out_path, &config) {
-                    Ok(()) => count += 1,
-                    Err(e) => {
-                        eprintln!("✗ {}: {e}", path.display());
-                        errors += 1;
-                    }
-                }
-            }
-        }
-        println!("Done: {count} converted, {errors} errors");
-    } else {
-        match opts.output.as_deref() {
-            Some(out) => vectorize_single(input, out, &config)?,
-            None => {
-                let img = load_image(input)?;
-                let req = covecto_core::VectorizeRequest::new(img).with_config(config.clone());
-                let result = vectorize(&req)?;
-                let svg = if config.optimize {
-                    optimize_svg(&result.svg, &config.optimize_config)?
-                } else {
-                    result.svg
-                };
-                println!("{svg}");
-            }
-        }
-    }
-    Ok(())
+fn make_progress(total: usize) -> (MultiProgress, ProgressBar) {
+    let multi = MultiProgress::new();
+    let pb = multi.add(ProgressBar::new(total as u64));
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.cyan} [{bar:30.cyan/blue}] {pos}/{len} {msg}")
+            .unwrap()
+            .progress_chars("█▓░"),
+    );
+    pb.set_message("vectorizing".to_string());
+    (multi, pb)
 }
 
 fn is_image_file(path: &Path) -> bool {
@@ -195,14 +387,384 @@ fn is_image_file(path: &Path) -> bool {
     )
 }
 
-fn _print_result_summary(result: &covecto_core::VectorizeResult) {
-    println!(
-        "Engine: {} | Time: {}ms | Size: {} bytes | Paths: {}",
-        result.engine_used,
-        result.metadata.processing_time_ms,
-        result.metadata.svg_byte_size,
-        result.metadata.path_count,
-    );
+/// Detect if input string looks like a glob pattern (contains * ? or [).
+fn is_glob_pattern(s: &str) -> bool {
+    s.contains('*') || s.contains('?') || s.contains('[')
+}
+
+/// Collect image files from input path.
+/// Handles: single file, directory (flat/recursive), glob patterns.
+fn collect_files(input: &Path, recursive: bool) -> anyhow::Result<Vec<PathBuf>> {
+    let input_str = input.to_string_lossy();
+
+    // Glob pattern mode
+    if is_glob_pattern(&input_str) {
+        let pattern = if recursive {
+            // If input has no path separator, prefix with ./
+            if !input_str.contains('/') && !input_str.contains('\\') {
+                format!("./**/{input_str}")
+            } else {
+                input_str.to_string()
+            }
+        } else {
+            input_str.to_string()
+        };
+
+        let entries: Vec<PathBuf> = glob::glob(&pattern)?
+            .filter_map(|e| e.ok())
+            .filter(|p| p.is_file() && is_image_file(p))
+            .collect();
+
+        if entries.is_empty() {
+            anyhow::bail!("No files matched pattern: {pattern}");
+        }
+        return Ok(entries);
+    }
+
+    // Single file
+    if input.is_file() {
+        return Ok(vec![input.to_path_buf()]);
+    }
+
+    // Directory mode
+    if input.is_dir() {
+        if recursive {
+            let entries: Vec<PathBuf> = walkdir::WalkDir::new(input)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+                .map(|e| e.into_path())
+                .filter(|p| is_image_file(p))
+                .collect();
+            if entries.is_empty() {
+                anyhow::bail!("No image files found in: {}", input.display());
+            }
+            Ok(entries)
+        } else {
+            let entries: Vec<PathBuf> = std::fs::read_dir(input)?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_file() && is_image_file(p))
+                .collect();
+            if entries.is_empty() {
+                anyhow::bail!("No image files found in: {}", input.display());
+            }
+            Ok(entries)
+        }
+    } else {
+        anyhow::bail!("Input not found: {}", input.display());
+    }
+}
+
+/// Compute output path for a batch item, optionally preserving directory structure.
+fn compute_output_path(
+    input: &Path,
+    root: &Path,
+    out_dir: &Path,
+    template: &str,
+    ext: &str,
+    preserve_structure: bool,
+) -> PathBuf {
+    let stem = input.file_stem().unwrap().to_string_lossy().to_string();
+    let filename = apply_output_template(template, &stem, ext);
+
+    if preserve_structure {
+        // Preserve relative path from root
+        if let Ok(rel) = input.strip_prefix(root)
+            && let Some(parent) = rel.parent()
+            && parent != Path::new("")
+            && parent != Path::new(".")
+        {
+            return out_dir.join(parent).join(filename);
+        }
+    }
+    out_dir.join(filename)
+}
+
+/// Lightweight engine detection for dry-run (reads image dimensions without full decode).
+fn detect_engine_preview(path: &Path) -> String {
+    match image::image_dimensions(path) {
+        Ok((w, h)) => {
+            if w <= 256 && h <= 256 {
+                "pixel-exact".to_string()
+            } else {
+                "spline".to_string()
+            }
+        }
+        Err(_) => "auto".to_string(),
+    }
+}
+fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
+    let config = opts.to_config()?;
+    let format = parse_output_format(&opts.format)?;
+    let ext = output_extension(&format);
+    let template = opts.output_template.as_deref().unwrap_or("{stem}.{ext}");
+
+    // Collect files
+    let files = collect_files(input, opts.recursive)?;
+
+    // Single file (non-batch) mode
+    if files.len() == 1
+        && input.is_file()
+        && !opts.recursive
+        && !is_glob_pattern(&input.to_string_lossy())
+    {
+        let file = &files[0];
+
+        if opts.dry_run {
+            let out_path = opts.output.clone().unwrap_or_else(|| {
+                let stem = file.file_stem().unwrap().to_string_lossy().to_string();
+                PathBuf::from(apply_output_template(template, &stem, ext))
+            });
+            let engine = detect_engine_preview(file);
+            println!(
+                "Would process: {} → {} (engine: {}, format: {})",
+                file.display(),
+                out_path.display(),
+                engine,
+                ext,
+            );
+            return Ok(());
+        }
+
+        let out_path = opts.output.clone().unwrap_or_else(|| {
+            let stem = file.file_stem().unwrap().to_string_lossy().to_string();
+            PathBuf::from(apply_output_template(template, &stem, ext))
+        });
+
+        if opts.json {
+            let show_progress = !opts.no_progress;
+            let spinner = if show_progress {
+                Some(make_spinner(&format!(
+                    "{} → {} ",
+                    file.display(),
+                    out_path.display()
+                )))
+            } else {
+                None
+            };
+
+            match vectorize_single_raw(file, Some(&out_path), &config, &format) {
+                Ok((result, bytes, out)) => {
+                    if let Some(s) = spinner {
+                        s.finish_and_clear();
+                    }
+                    let json_result = JsonResult::from_result(file, &out, &result, &format, bytes);
+                    let json_output = if opts.json_pretty {
+                        serde_json::to_string_pretty(&json_result)?
+                    } else {
+                        serde_json::to_string(&json_result)?
+                    };
+                    println!("{json_output}");
+                }
+                Err(e) => {
+                    if let Some(s) = spinner {
+                        s.finish_and_clear();
+                    }
+                    return Err(e);
+                }
+            }
+        } else if opts.output.is_some() {
+            let show_progress = !opts.no_progress;
+            let spinner = if show_progress {
+                Some(make_spinner(&format!(
+                    "{} → {} ",
+                    file.display(),
+                    out_path.display()
+                )))
+            } else {
+                None
+            };
+
+            let res = vectorize_single_raw(file, Some(&out_path), &config, &format);
+            if let Some(s) = spinner {
+                s.finish_and_clear();
+            }
+            res?;
+        } else {
+            // No --output and no --json: write to stdout (backward compat)
+            let img = load_image(file)?;
+            let req = covecto_core::VectorizeRequest::new(img).with_config(config.clone());
+            let result = vectorize(&req)?;
+            let (bytes, _ct) = convert_output(&result.svg, format)?;
+            std::io::Write::write_all(&mut std::io::stdout(), &bytes)?;
+        }
+
+        return Ok(());
+    }
+
+    // Batch mode (multiple files: directory, recursive, glob)
+    let root = input;
+    let preserve_structure = opts.recursive && !is_glob_pattern(&input.to_string_lossy());
+    let out_dir = opts
+        .output_dir
+        .clone()
+        .or_else(|| opts.output.clone())
+        .unwrap_or_else(|| root.join("vectorized"));
+    std::fs::create_dir_all(&out_dir)?;
+
+    // Dry-run: just list files
+    if opts.dry_run {
+        println!("Would process {} files:", files.len());
+        for file in &files {
+            let out_path =
+                compute_output_path(file, root, &out_dir, template, ext, preserve_structure);
+            let engine = detect_engine_preview(file);
+            println!(
+                "  {} → {} (engine: {})",
+                file.display(),
+                out_path.display(),
+                engine
+            );
+        }
+        return Ok(());
+    }
+
+    let show_progress = !opts.no_progress && !files.is_empty();
+    let (multi, pb) = if show_progress {
+        let (m, p) = make_progress(files.len());
+        (Some(m), Some(p))
+    } else {
+        (None, None)
+    };
+
+    // Pre-compute output paths (sequential — needs HashSet for dedup)
+    let out_paths: Vec<PathBuf> = {
+        let mut used_names = HashSet::with_capacity(files.len());
+        files
+            .iter()
+            .map(|file| {
+                let mut out_path =
+                    compute_output_path(file, root, &out_dir, template, ext, preserve_structure);
+
+                // Deduplicate output filenames to prevent silent overwrites
+                if !preserve_structure {
+                    let name = out_path.file_name().unwrap().to_string_lossy().to_string();
+                    if !used_names.insert(name) {
+                        let stem = file.file_stem().unwrap().to_string_lossy().to_string();
+                        let parent_dir = file
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown");
+                        let mut candidate = format!("{parent_dir}_{stem}.{ext}");
+                        let mut counter: usize = 1;
+                        while !used_names.insert(candidate.clone()) {
+                            counter += 1;
+                            candidate = format!("{parent_dir}_{stem}_{counter}.{ext}");
+                        }
+                        out_path = out_dir.join(candidate);
+                    }
+                }
+                out_path
+            })
+            .collect()
+    };
+
+    // Atomic counters for thread-safe progress and error tracking
+    let count = AtomicU32::new(0);
+    let error_count = AtomicU32::new(0);
+    let error_list = Mutex::new(Vec::new());
+
+    // Store results as (index, JsonResult) to preserve input ordering
+    let indexed_results: Vec<(usize, JsonResult)> = files
+        .par_iter()
+        .zip(out_paths.par_iter())
+        .enumerate()
+        .filter_map(|(idx, (file, out_path))| {
+            let res = vectorize_single_raw(file, Some(out_path), &config, &format);
+            if let Some(ref p) = pb {
+                p.inc(1);
+            }
+            match res {
+                Ok((result, bytes, out)) => {
+                    count.fetch_add(1, Ordering::Relaxed);
+                    if opts.json {
+                        Some((
+                            idx,
+                            JsonResult::from_result(file, &out, &result, &format, bytes),
+                        ))
+                    } else {
+                        None
+                    }
+                }
+                Err(e) => {
+                    error_count.fetch_add(1, Ordering::Relaxed);
+                    error_list
+                        .lock()
+                        .unwrap()
+                        .push((file.display().to_string(), e.to_string()));
+                    None
+                }
+            }
+        })
+        .collect();
+
+    if let Some(p) = pb {
+        p.finish_and_clear();
+    }
+    drop(multi);
+
+    // Report errors collected from threads
+    let errors = error_list.into_inner().unwrap();
+    for (path, err) in &errors {
+        eprintln!("\u{2717} {path}: {err}");
+    }
+
+    let count = count.load(Ordering::Relaxed);
+    let error_count = errors.len() as u32;
+
+    // Sort by original index to preserve input ordering in JSON output
+    let mut sorted_results = indexed_results;
+    sorted_results.sort_by_key(|(idx, _)| *idx);
+    let results: Vec<JsonResult> = sorted_results.into_iter().map(|(_, r)| r).collect();
+
+    if !opts.json && !opts.no_progress {
+        println!("Done: {count} converted, {error_count} errors");
+    }
+
+    if opts.json {
+        let json_output = if opts.json_pretty {
+            serde_json::to_string_pretty(&results)?
+        } else {
+            serde_json::to_string(&results)?
+        };
+        println!("{json_output}");
+    }
+
+    Ok(())
+}
+
+fn from_args(args: VectorizeArgs) -> VectorizeOpts {
+    VectorizeOpts {
+        output: args.output,
+        output_dir: args.output_dir,
+        output_template: args.output_template,
+        format: args.format,
+        engine: args.engine,
+        preset: args.preset,
+        profile: args.profile,
+        color_precision: args.color_precision,
+        filter_speckle: args.filter_speckle,
+        corner_threshold: args.corner_threshold,
+        splice_threshold: args.splice_threshold,
+        color_mode: args.color_mode,
+        hierarchical: args.hierarchical,
+        path_simplify: args.path_simplify,
+        layer_difference: args.layer_difference,
+        length_threshold: args.length_threshold,
+        max_iterations: args.max_iterations,
+        path_precision: args.path_precision,
+        optimize: args.optimize,
+        optimize_preset: args.optimize_preset,
+        multipass: args.multipass,
+        multipass_iterations: args.multipass_iterations,
+        recursive: args.recursive,
+        json: args.json || args.json_pretty,
+        json_pretty: args.json_pretty,
+        no_progress: args.no_progress,
+        dry_run: args.dry_run,
+    }
 }
 
 #[tokio::main]
@@ -211,25 +773,9 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Vectorize {
-            input,
-            output,
-            engine,
-            preset,
-            optimize,
-            optimize_preset,
-            multipass,
-            multipass_iterations,
-        } => {
-            let opts = VectorizeOpts {
-                output,
-                engine,
-                preset,
-                optimize,
-                optimize_preset,
-                multipass,
-                multipass_iterations,
-            };
+        Commands::Vectorize(args) => {
+            let input = args.input.clone();
+            let opts = from_args(*args);
             cmd_vectorize(&input, &opts)?;
         }
         Commands::Serve { port } => {

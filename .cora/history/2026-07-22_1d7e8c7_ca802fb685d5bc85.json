@@ -1,0 +1,12 @@
+{
+  "timestamp": "2026-07-22T10:44:52.582648861Z",
+  "commit": "1d7e8c7",
+  "branch": "feat/json-output-and-progress-bar",
+  "files_reviewed": 0,
+  "lines_reviewed": null,
+  "findings": {},
+  "categories": {},
+  "quality_score": 10.0,
+  "gate_status": "disabled",
+  "duration_ms": null
+}

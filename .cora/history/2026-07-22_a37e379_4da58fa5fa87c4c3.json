@@ -1,0 +1,12 @@
+{
+  "timestamp": "2026-07-22T13:29:15.505011962Z",
+  "commit": "a37e379",
+  "branch": "feat/cli-recursive-glob-template-dryrun",
+  "files_reviewed": 0,
+  "lines_reviewed": null,
+  "findings": {},
+  "categories": {},
+  "quality_score": 10.0,
+  "gate_status": "disabled",
+  "duration_ms": null
+}
