@@ -13,8 +13,8 @@ name = "covecto"
 path = "src/main.rs"
 
 [dependencies]
-covecto-core = { workspace = true }
-covecto-api = { path = "../api" }
+covecto-core = { workspace = true, version = "0.1" }
+covecto-api = { workspace = true, version = "0.1" }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

@@ -1,126 +1,211 @@
 name: Release
 
+# Release is triggered by pushing a vX.Y.Z tag.
+#
+# PREREQUISITE: Before tagging, merge develop → main via PR.
+# The tag must point to a commit on main, NOT develop.
+# GitFlow: develop (default) → PR → main → tag → release.
+#
+# This workflow does NOT sync main — main must already be up to date.
+
 on:
   push:
-    tags: ["v*"]
+    tags:
+      - 'v*'
 
 env:
   CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  verify-tag-on-main:
-    name: Verify tag on main
+  verify-main:
+    name: Verify tag is on main
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Check tag exists on main
+      - name: Check tag is on main
         run: |
           git fetch origin main
           TAG_SHA=$(git rev-parse "${{ github.ref }}^{commit}")
           MAIN_SHA=$(git rev-parse origin/main)
+          echo "Tag: $TAG_SHA"
+          echo "main: $MAIN_SHA"
           if [ "$TAG_SHA" = "$MAIN_SHA" ]; then
             echo "✅ Tag is main HEAD"
           elif git merge-base --is-ancestor "$TAG_SHA" origin/main 2>/dev/null; then
-            echo "✅ Tag commit is in main history"
+            echo "✅ Tag commit $TAG_SHA is in main history"
           else
-            echo "::error::Tag commit is NOT on main. Merge develop → main via PR before tagging."
+            echo "::error::Tag commit $TAG_SHA is NOT on main."
+            echo "Merge develop → main via PR before tagging."
             exit 1
           fi
 
   build-release:
     name: Build ${{ matrix.target }}
-    needs: [verify-tag-on-main]
+    needs: [verify-main]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Linux x86_64
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            artifact: covecto-x86_64-unknown-linux-gnu
+            ext: tar.gz
+          # Linux ARM64
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            artifact: covecto-aarch64-unknown-linux-gnu
+            ext: tar.gz
+          # macOS Apple Silicon
           - os: macos-latest
             target: aarch64-apple-darwin
+            artifact: covecto-aarch64-apple-darwin
+            ext: tar.gz
+          # Windows x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            artifact: covecto-x86_64-pc-windows-msvc
             ext: zip
+
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-      - name: Build release
+
+      - name: Build release binaries
         run: cargo build --release --target ${{ matrix.target }} -p covecto -p covecto-api
-      - name: Strip (Unix)
+
+      - name: Strip binaries (Unix)
         if: runner.os != 'Windows'
-        run: strip target/${{ matrix.target }}/release/covecto target/${{ matrix.target }}/release/covecto-api || true
+        run: |
+          strip target/${{ matrix.target }}/release/covecto || true
+          strip target/${{ matrix.target }}/release/covecto-api || true
+
+      - name: Extract version
+        id: version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf "${{ github.workspace }}/dist/covecto-${{ matrix.target }}-${{ github.ref_name }}.tar.gz" covecto covecto-api
+          mkdir -p release
+          cp target/${{ matrix.target }}/release/covecto release/covecto
+          cp target/${{ matrix.target }}/release/covecto-api release/covecto-api
+          cd release
+          tar czf "${{ matrix.artifact }}-${{ steps.version.outputs.VERSION }}.${{ matrix.ext }}" covecto covecto-api
+
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          cd target/${{ matrix.target }}/release
-          7z a "${{ github.workspace }}/dist/covecto-${{ matrix.target }}-${{ github.ref_name }}.zip" covecto.exe covecto-api.exe
+          mkdir release
+          cp target/${{ matrix.target }}/release/covecto.exe release/covecto.exe
+          cp target/${{ matrix.target }}/release/covecto-api.exe release/covecto-api.exe
+          cd release
+          7z a "${{ matrix.artifact }}-${{ steps.version.outputs.VERSION }}.${{ matrix.ext }}" covecto.exe covecto-api.exe
+
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: covecto-${{ matrix.target }}-${{ github.ref_name }}
-          path: dist/
+          name: ${{ matrix.artifact }}-${{ steps.version.outputs.VERSION }}
+          path: release/${{ matrix.artifact }}-${{ steps.version.outputs.VERSION }}.${{ matrix.ext }}
 
   publish-crates:
     name: Publish to crates.io
-    needs: [verify-tag-on-main]
+    needs: [verify-main]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Publish covecto-core
-        run: cargo publish -p covecto-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      - name: Publish covecto-api
-        run: cargo publish -p covecto-api --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      - name: Publish covecto (CLI)
-        run: cargo publish -p covecto --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - uses: actions/checkout@v7
 
-  github-release:
-    name: GitHub Release
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish covecto-core
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }} -p covecto-core --allow-dirty
+        continue-on-error: true
+
+      - name: Publish covecto-api
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }} -p covecto-api --allow-dirty
+        continue-on-error: true
+
+      - name: Publish covecto (CLI)
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }} -p covecto --allow-dirty
+        continue-on-error: true
+
+  release:
+    name: Create GitHub Release
     needs: [build-release]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-artifacts
           merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la release-artifacts/
+
       - name: Generate SHA256 checksums
-        run: cd release-artifacts && sha256sum * > checksums-sha256.txt && cat checksums-sha256.txt
-      - name: Extract version
+        run: |
+          cd release-artifacts
+          sha256sum * > checksums-sha256.txt
+          cat checksums-sha256.txt
+
+      - name: Extract version from tag
         id: version
-        run: echo "VERSION=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-      - name: Extract changelog
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Extract changelog for this version
         id: changelog
         run: |
-          CLEAN_VER="${GITHUB_REF_NAME#v}"
-          awk "/^## \[${CLEAN_VER}\]/{found=1; next} /^## \[/{found=0} found && !/^\[.*\]: https:/" CHANGELOG.md > changelog-body.md || true
+          VER="${{ steps.version.outputs.VERSION }}"
+          CLEAN_VER="${VER#v}"
+          awk "/^## \[${CLEAN_VER}\]/{found=1; next} /^## \[/{found=0} found && !/^\[.*\]: https:/" CHANGELOG.md > changelog-body.md
+          if [ ! -s changelog-body.md ]; then
+            echo "::warning::No CHANGELOG section found for [${CLEAN_VER}]"
+            echo "No changelog entry found for this version." > changelog-body.md
+          fi
           echo "CLEAN_VER=${CLEAN_VER}" >> $GITHUB_OUTPUT
-      - name: Create release
+
+      - name: Generate release notes
+        run: |
+          VER="${{ steps.version.outputs.VERSION }}"
+          echo "## What's New in ${VER}" > release-notes.md
+          echo "" >> release-notes.md
+          cat changelog-body.md >> release-notes.md
+          echo "" >> release-notes.md
+          printf '### 📦 Binaries\n\nEach archive contains **two binaries**:\n- `covecto` — CLI tool\n- `covecto-api` — HTTP API server\n\n' >> release-notes.md
+          printf '| Platform | File |\n|----------|------|\n' >> release-notes.md
+          printf '| Linux (x86_64) | `covecto-x86_64-unknown-linux-gnu-%s.tar.gz` |\n' "${VER}" >> release-notes.md
+          printf '| Linux (ARM64) | `covecto-aarch64-unknown-linux-gnu-%s.tar.gz` |\n' "${VER}" >> release-notes.md
+          printf '| macOS (Apple Silicon) | `covecto-aarch64-apple-darwin-%s.tar.gz` |\n' "${VER}" >> release-notes.md
+          printf '| Windows (x86_64) | `covecto-x86_64-pc-windows-msvc-%s.zip` |\n\n' "${VER}" >> release-notes.md
+          printf '### 🚀 Quick Start\n\n```bash\n# Install via cargo\ncargo install covecto\n\n# Or download binary\ncurl -fsSL https://github.com/codecoradev/covecto/releases/download/%s/covecto-x86_64-unknown-linux-gnu-%s.tar.gz | tar xz\n\n# Vectorize an image\ncovecto input.png -o output.svg\n\n# Start API server\ncovecto-api\n```\n\n' "${VER}" "${VER}" >> release-notes.md
+          printf '**Full changelog:** https://github.com/codecoradev/covecto/blob/main/CHANGELOG.md\n' >> release-notes.md
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          body_path: changelog-body.md
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: Release ${{ steps.version.outputs.VERSION }}
+          body_path: release-notes.md
           files: release-artifacts/*
           draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(steps.version.outputs.VERSION, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   docker:
     name: Build & Push Docker Image
@@ -130,7 +215,8 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v7
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -153,7 +239,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Download Linux binaries
+      - name: Download Linux binaries from build artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: covecto-*-${{ github.ref_name }}
@@ -168,13 +254,15 @@ jobs:
           ARM64=$(find . -name "covecto-aarch64-unknown-linux-gnu-${{ github.ref_name }}.tar.gz" | head -1)
           if [ -z "$AMD64" ] || [ -z "$ARM64" ]; then
             echo "::error::Linux binary artifacts not found"
-            find . -type f | head -20
+            echo "Available files:" && find . -type f | head -20
             exit 1
           fi
           tar xzf "$AMD64" -C ../binaries
           mv ../binaries/covecto ../binaries/covecto-amd64
+          mv ../binaries/covecto-api ../binaries/covecto-api-amd64
           tar xzf "$ARM64" -C ../binaries
           mv ../binaries/covecto ../binaries/covecto-arm64
+          mv ../binaries/covecto-api ../binaries/covecto-api-arm64
           chmod +x ../binaries/*
           ls -lh ../binaries/
 
@@ -196,7 +284,8 @@ jobs:
           context: .
           file: ./Dockerfile.binaries
           platforms: linux/amd64,linux/arm64/v8
-          build-args: VERSION=${{ github.ref_name }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
