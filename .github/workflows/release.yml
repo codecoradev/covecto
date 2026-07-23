@@ -60,12 +60,14 @@ jobs:
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
+          mkdir -p "${{ github.workspace }}/dist"
           cd target/${{ matrix.target }}/release
           tar czf "${{ github.workspace }}/dist/covecto-${{ matrix.target }}-${{ github.ref_name }}.tar.gz" covecto covecto-api
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force -Path "${{ github.workspace }}/dist"
           cd target/${{ matrix.target }}/release
           7z a "${{ github.workspace }}/dist/covecto-${{ matrix.target }}-${{ github.ref_name }}.zip" covecto.exe covecto-api.exe
       - name: Upload artifact

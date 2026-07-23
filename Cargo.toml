@@ -16,7 +16,8 @@ authors = ["CodeCora <hello@codecora.dev>"]
 
 [workspace.dependencies]
 # Internal
-covecto-core = { path = "crates/core" }
+covecto-core = { path = "crates/core", version = "0.1" }
+covecto-api = { path = "crates/api", version = "0.1" }
 
 # Image
 image = "0.25"

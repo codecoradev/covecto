@@ -13,7 +13,7 @@ name = "covecto-api"
 path = "src/main.rs"
 
 [dependencies]
-covecto-core = { workspace = true }
+covecto-core = { workspace = true, version = "0.1" }
 axum = { workspace = true }
 tokio = { workspace = true }
 tower-http = { workspace = true }
