@@ -27,11 +27,11 @@ Most vectorizers are one-trick — good at photos or good at icons, never both. 
 ## Install
 
 ```bash
-# Cargo (recommended)
-cargo install covecto
+# One-line install (Linux/macOS/Windows)
+curl -fsSL https://codecora.dev/covecto/install | sh
 
-# Pre-built binary — Linux, macOS, Windows
-# https://github.com/codecoradev/covecto/releases/latest
+# Cargo
+cargo install covecto
 
 # Docker
 docker pull ghcr.io/codecoradev/covecto:latest
