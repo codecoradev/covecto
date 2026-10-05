@@ -2,15 +2,13 @@ import { createConfig } from '@codecora/theme/vitepress/config'
 
 export default createConfig({
   product: 'covecto',
-  title: 'Covecto',
-  description: 'Dual-engine image vectorization — pixel-exact for icons, smooth curves for art.',
+  title: 'Covecto: Image to SVG Vectorizer CLI | CodeCora',
+  description: 'Covecto converts images to SVG with a dual-engine vectorizer CLI: pixel-exact for icons, smooth Bézier curves for art. SVG, PDF, EPS output. Zero dependencies.',
   accent: 'orange',
   repo: 'covecto',
-  head: [
-    ['meta', { property: 'og:title', content: 'Covecto — Image to SVG Vectorization' }],
-    ['meta', { property: 'og:description', content: 'Dual-engine image vectorizer: pixel-exact for icons, Bézier splines for art. CLI + HTTP API.' }],
-    ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
-  ],
+  // NOTE: do NOT pass `head` here — @codecora/theme createConfig() drops
+  // opts.head (never merged into its hardcoded head array). OG/Twitter meta
+  // lives in docs/index.md frontmatter instead; theme fix tracked separately.
   ignoreDeadLinks: true,
   sidebar: [
     {
