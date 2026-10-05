@@ -1,5 +1,27 @@
 ---
 layout: home
+head:
+  - - meta
+    - property: og:url
+      content: 'https://codecora.dev/covecto/docs'
+  - - meta
+    - property: og:title
+      content: 'Covecto: Image to SVG Vectorizer CLI | CodeCora'
+  - - meta
+    - property: og:description
+      content: 'Covecto converts images to SVG with a dual-engine vectorizer CLI: pixel-exact for icons, smooth Bézier curves for art. SVG, PDF, EPS output. Zero dependencies.'
+  - - meta
+    - name: twitter:card
+      content: 'summary_large_image'
+  - - meta
+    - name: twitter:title
+      content: 'Covecto: Image to SVG Vectorizer CLI | CodeCora'
+  - - meta
+    - name: twitter:description
+      content: 'Covecto converts images to SVG with a dual-engine vectorizer CLI: pixel-exact for icons, smooth Bézier curves for art. SVG, PDF, EPS output. Zero dependencies.'
+  - - link
+    - rel: canonical
+      href: 'https://codecora.dev/covecto/docs'
 
 hero:
   name: covecto
