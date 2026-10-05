@@ -4,7 +4,7 @@ export default createConfig({
   product: 'covecto',
   title: 'Covecto: Image to SVG Vectorizer CLI | CodeCora',
   description: 'Covecto converts images to SVG with a dual-engine vectorizer CLI: pixel-exact for icons, smooth Bézier curves for art. SVG, PDF, EPS output. Zero dependencies.',
-  accent: 'orange',
+  accent: 'peach',
   repo: 'covecto',
   // NOTE: do NOT pass `head` here — @codecora/theme createConfig() drops
   // opts.head (never merged into its hardcoded head array). OG/Twitter meta
