@@ -294,50 +294,106 @@ mod tests {
         // Anti-divergence lock (issue #45): both public entry points must
         // produce identical SVG bytes and equal metadata for the same request.
         // This is the failure class behind #42 (streaming skipped optimize).
-        let img = RgbaImage::from_fn(24, 18, |x, y| {
-            image::Rgba([
+        let rgba = image::Rgba;
+        let mixed = RgbaImage::from_fn(24, 18, |x, y| {
+            rgba([
                 (x * 7 % 256) as u8,
                 (y * 11 % 256) as u8,
                 ((x + y) % 256) as u8,
                 if y < 4 { 128 } else { 255 },
             ])
         });
-        for engine in [Engine::PixelExact, Engine::Spline] {
-            for optimize in [false, true] {
-                let req = VectorizeRequest::new(img.clone())
-                    .with_engine(engine)
-                    .with_optimize(optimize);
-
-                let buffered = vectorize(&req).unwrap();
-                let mut sink = Vec::new();
-                let streamed = vectorize_to(&mut sink, &req).unwrap();
-
-                assert_eq!(
-                    buffered.svg.as_bytes(),
-                    sink.as_slice(),
-                    "{engine:?} optimize={optimize}: SVG bytes differ between vectorize() and vectorize_to()"
-                );
-                assert_eq!(
-                    buffered.engine_used, streamed.engine_used,
-                    "{engine:?} optimize={optimize}: engine_used differs"
-                );
-                assert_eq!(
-                    buffered.metadata.svg_byte_size, streamed.metadata.svg_byte_size,
-                    "{engine:?} optimize={optimize}: svg_byte_size differs"
-                );
-                assert_eq!(
-                    buffered.metadata.path_count, streamed.metadata.path_count,
-                    "{engine:?} optimize={optimize}: path_count differs"
-                );
-                assert_eq!(
-                    buffered.metadata.compression_ratio, streamed.metadata.compression_ratio,
-                    "{engine:?} optimize={optimize}: compression_ratio differs"
-                );
-                assert_eq!(
-                    buffered.metadata.input_size, streamed.metadata.input_size,
-                    "{engine:?} optimize={optimize}: input_size differs"
-                );
+        // several translucent alpha groups
+        let multi_alpha = RgbaImage::from_fn(16, 16, |x, y| {
+            let a = [64, 128, 200, 255][(x / 4) as usize % 4];
+            rgba([(x * 16) as u8, (y * 16) as u8, 90, a])
+        });
+        // fully transparent pixels (a == 0) mixed with opaque ones
+        let holes = RgbaImage::from_fn(12, 12, |x, y| {
+            if (x + y) % 3 == 0 {
+                rgba([9, 9, 9, 0])
+            } else {
+                rgba([(x * 20) as u8, (y * 20) as u8, 40, 255])
             }
+        });
+        let one = RgbaImage::from_pixel(1, 1, rgba([10, 200, 30, 255]));
+        let icon = RgbaImage::from_fn(16, 16, |x, y| {
+            rgba([if (x / 4 + y / 4) % 2 == 0 { 255 } else { 0 }, 0, 0, 255])
+        });
+
+        type Tweak = fn(&mut VectorizeConfig);
+        let tweaks: [(&str, Tweak); 7] = [
+            ("default", |_| {}),
+            ("binary", |c| c.color_mode = Some(ColorMode::Binary)),
+            ("cutout", |c| {
+                c.hierarchical = Some(HierarchicalMode::Cutout)
+            }),
+            ("speckle", |c| c.filter_speckle = Some(8)),
+            ("poster", |c| c.spline_preset = Some(SplinePreset::Poster)),
+            ("opt-safe", |c| {
+                c.optimize_config.preset = OptimizePreset::Safe
+            }),
+            ("opt-none", |c| {
+                c.optimize_config.preset = OptimizePreset::None
+            }),
+        ];
+        let images = [
+            ("mixed", &mixed),
+            ("multi_alpha", &multi_alpha),
+            ("holes", &holes),
+            ("1x1", &one),
+        ];
+
+        let mut cases = Vec::new();
+        for (iname, img) in images {
+            for engine in [Engine::PixelExact, Engine::Spline] {
+                for (tname, tweak) in tweaks {
+                    for optimize in [false, true] {
+                        let name = format!("{iname}/{engine:?}/{tname}/opt={optimize}");
+                        cases.push((name, img, engine, tweak, optimize));
+                    }
+                }
+            }
+        }
+        // Engine::Auto (resolves to PixelExact for the small icon)
+        for optimize in [false, true] {
+            let name = format!("icon/Auto/default/opt={optimize}");
+            cases.push((name, &icon, Engine::Auto, tweaks[0].1, optimize));
+        }
+
+        for (name, img, engine, tweak, optimize) in cases {
+            let mut req = VectorizeRequest::new(img.clone())
+                .with_engine(engine)
+                .with_optimize(optimize);
+            tweak(&mut req.config);
+
+            let buffered = vectorize(&req).unwrap();
+            let mut sink = Vec::new();
+            let streamed = vectorize_to(&mut sink, &req).unwrap();
+            let (bm, sm) = (&buffered.metadata, &streamed.metadata);
+
+            assert_eq!(
+                buffered.svg.as_bytes(),
+                sink.as_slice(),
+                "{name}: SVG bytes"
+            );
+            assert_eq!(buffered.engine_used, streamed.engine_used, "{name}: engine");
+            assert_eq!(bm.svg_byte_size, sm.svg_byte_size, "{name}: svg_byte_size");
+            assert_eq!(bm.path_count, sm.path_count, "{name}: path_count");
+            assert_eq!(bm.compression_ratio, sm.compression_ratio, "{name}: ratio");
+            assert_eq!(bm.input_size, sm.input_size, "{name}: input_size");
+
+            // Ground truth: metadata must match what was actually written.
+            assert_eq!(
+                sm.svg_byte_size,
+                sink.len(),
+                "{name}: size != written bytes"
+            );
+            assert_eq!(
+                sm.path_count,
+                count_svg_paths(std::str::from_utf8(&sink).unwrap()),
+                "{name}: path_count != '<path' in written bytes"
+            );
         }
     }
 

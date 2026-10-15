@@ -8,6 +8,7 @@ use crate::Result;
 use image::RgbaImage;
 use std::collections::BTreeMap;
 use std::fmt::Write;
+use std::io::Write as _;
 
 /// Vectorize an image using pixel-exact algorithm.
 pub fn vectorize(img: &RgbaImage) -> Result<String> {
@@ -204,14 +205,16 @@ pub fn vectorize_to<W: std::io::Write>(writer: &mut W, img: &RgbaImage) -> Resul
         }
     }
 
-    // Stream SVG output
-    let mut byte_count = 0usize;
-    let mut path_count = 0usize;
+    // Stream SVG output through a counting adapter so metadata can't drift
+    // from what was actually written.
+    let mut writer = CountingWriter {
+        inner: writer,
+        bytes: 0,
+        paths: 0,
+    };
 
     // SVG header
-    let header = svg_header(width, height);
-    byte_count += header.len();
-    writer.write_all(header.as_bytes())?;
+    writer.write_all(svg_header(width, height).as_bytes())?;
 
     // Group translucent paths by alpha
     let mut translucent_by_alpha: BTreeMap<u8, Vec<([u8; 4], String)>> = BTreeMap::new();
@@ -219,12 +222,10 @@ pub fn vectorize_to<W: std::io::Write>(writer: &mut W, img: &RgbaImage) -> Resul
     for (color, (data, _)) in &paths_by_color {
         let [r, g, b, a] = *color;
         if a == 255 {
-            path_count += 1;
             let line = format!(
                 r##"<path fill="#{:02x}{:02x}{:02x}" d="{}"/>"##,
                 r, g, b, data
             );
-            byte_count += line.len();
             writer.write_all(line.as_bytes())?;
         } else {
             translucent_by_alpha
@@ -237,28 +238,49 @@ pub fn vectorize_to<W: std::io::Write>(writer: &mut W, img: &RgbaImage) -> Resul
     for (a, paths) in &translucent_by_alpha {
         let opacity = f32::from(*a) / 255.0;
         let open = format!(r#"<g fill-opacity="{:.3}">"#, opacity);
-        byte_count += open.len();
         writer.write_all(open.as_bytes())?;
         for ([r, g, b, _], data) in paths {
             let line = format!(
                 r##"<path fill="#{:02x}{:02x}{:02x}" d="{}"/>"##,
                 r, g, b, data
             );
-            byte_count += line.len();
             writer.write_all(line.as_bytes())?;
-            path_count += 1;
         }
-        byte_count += 4; // </g>
         writer.write_all(b"</g>")?;
     }
 
-    byte_count += 7; // "</svg>\n"
     writer.write_all(b"</svg>\n")?;
 
     Ok(VectorizeMeta {
-        byte_count,
-        path_count,
+        byte_count: writer.bytes,
+        path_count: writer.paths,
     })
+}
+
+/// Counts bytes and `<path` elements as they are written. Every emitted element
+/// goes through one `write_all` call, so a `<path` tag is never split.
+struct CountingWriter<'a, W: std::io::Write> {
+    inner: &'a mut W,
+    bytes: usize,
+    paths: usize,
+}
+
+impl<W: std::io::Write> std::io::Write for CountingWriter<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.write_all(buf)?;
+        Ok(buf.len())
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        self.inner.write_all(buf)?;
+        self.bytes += buf.len();
+        self.paths += buf.windows(5).filter(|w| *w == b"<path").count();
+        Ok(())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 fn svg_header(width: u32, height: u32) -> String {
