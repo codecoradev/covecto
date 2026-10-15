@@ -290,6 +290,58 @@ mod tests {
     }
 
     #[test]
+    fn test_parity_vectorize_vs_vectorize_to() {
+        // Anti-divergence lock (issue #45): both public entry points must
+        // produce identical SVG bytes and equal metadata for the same request.
+        // This is the failure class behind #42 (streaming skipped optimize).
+        let img = RgbaImage::from_fn(24, 18, |x, y| {
+            image::Rgba([
+                (x * 7 % 256) as u8,
+                (y * 11 % 256) as u8,
+                ((x + y) % 256) as u8,
+                if y < 4 { 128 } else { 255 },
+            ])
+        });
+        for engine in [Engine::PixelExact, Engine::Spline] {
+            for optimize in [false, true] {
+                let req = VectorizeRequest::new(img.clone())
+                    .with_engine(engine)
+                    .with_optimize(optimize);
+
+                let buffered = vectorize(&req).unwrap();
+                let mut sink = Vec::new();
+                let streamed = vectorize_to(&mut sink, &req).unwrap();
+
+                assert_eq!(
+                    buffered.svg.as_bytes(),
+                    sink.as_slice(),
+                    "{engine:?} optimize={optimize}: SVG bytes differ between vectorize() and vectorize_to()"
+                );
+                assert_eq!(
+                    buffered.engine_used, streamed.engine_used,
+                    "{engine:?} optimize={optimize}: engine_used differs"
+                );
+                assert_eq!(
+                    buffered.metadata.svg_byte_size, streamed.metadata.svg_byte_size,
+                    "{engine:?} optimize={optimize}: svg_byte_size differs"
+                );
+                assert_eq!(
+                    buffered.metadata.path_count, streamed.metadata.path_count,
+                    "{engine:?} optimize={optimize}: path_count differs"
+                );
+                assert_eq!(
+                    buffered.metadata.compression_ratio, streamed.metadata.compression_ratio,
+                    "{engine:?} optimize={optimize}: compression_ratio differs"
+                );
+                assert_eq!(
+                    buffered.metadata.input_size, streamed.metadata.input_size,
+                    "{engine:?} optimize={optimize}: input_size differs"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_vectorize_auto() {
         let img = RgbaImage::from_pixel(16, 16, image::Rgba([255, 0, 0, 255]));
         let req = VectorizeRequest::new(img).with_engine(Engine::Auto);
