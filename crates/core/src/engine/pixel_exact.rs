@@ -218,8 +218,8 @@ pub fn vectorize_to<W: std::io::Write>(writer: &mut W, img: &RgbaImage) -> Resul
 
     for (color, (data, _)) in &paths_by_color {
         let [r, g, b, a] = *color;
-        path_count += 1;
         if a == 255 {
+            path_count += 1;
             let line = format!(
                 r##"<path fill="#{:02x}{:02x}{:02x}" d="{}"/>"##,
                 r, g, b, data
@@ -252,7 +252,7 @@ pub fn vectorize_to<W: std::io::Write>(writer: &mut W, img: &RgbaImage) -> Resul
         writer.write_all(b"</g>")?;
     }
 
-    byte_count += 6; // </svg>\n
+    byte_count += 7; // "</svg>\n"
     writer.write_all(b"</svg>\n")?;
 
     Ok(VectorizeMeta {
