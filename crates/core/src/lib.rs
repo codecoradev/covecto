@@ -158,6 +158,18 @@ pub fn vectorize(request: &VectorizeRequest) -> Result<VectorizeResult> {
     })
 }
 
+fn render<W: std::io::Write>(
+    writer: &mut W,
+    engine: Engine,
+    request: &VectorizeRequest,
+) -> Result<pixel_exact::VectorizeMeta> {
+    match engine {
+        Engine::PixelExact => pixel_exact::vectorize_to(writer, &request.image),
+        Engine::Spline => spline::vectorize_to(writer, &request.image, &request.config),
+        Engine::Auto => unreachable!(),
+    }
+}
+
 /// Streaming vectorization — writes SVG directly to a writer instead of returning a String.
 /// For PixelExact: SVG is written incrementally during assembly.
 /// For Spline: vtracer builds in memory, but result is written directly to the writer.
@@ -174,16 +186,17 @@ pub fn vectorize_to<W: std::io::Write>(
     let (w, h) = (request.image.width(), request.image.height());
     let raw_pixel_bytes = (w as usize * h as usize) * 4;
 
-    let (svg_byte_size, path_count) = match engine {
-        Engine::PixelExact => {
-            let m = pixel_exact::vectorize_to(writer, &request.image)?;
-            (m.byte_count, m.path_count)
-        }
-        Engine::Spline => {
-            let m = spline::vectorize_to(writer, &request.image, &request.config)?;
-            (m.byte_count, m.path_count)
-        }
-        Engine::Auto => unreachable!(),
+    // Optimization needs the whole SVG, so buffer it and write the result once.
+    let (svg_byte_size, path_count) = if request.config.optimize {
+        let mut buf = Vec::new();
+        render(&mut buf, engine, request)?;
+        let raw = String::from_utf8(buf).map_err(|e| Error::Optimization(e.to_string()))?;
+        let svg = optimize_svg(&raw, &request.config.optimize_config)?;
+        writer.write_all(svg.as_bytes())?;
+        (svg.len(), count_svg_paths(&svg))
+    } else {
+        let m = render(writer, engine, request)?;
+        (m.byte_count, m.path_count)
     };
 
     let elapsed = start.elapsed();
@@ -244,6 +257,36 @@ mod tests {
         let result = vectorize(&req).unwrap();
         assert!(result.svg.contains("<svg"));
         assert_eq!(result.engine_used, Engine::Spline);
+    }
+
+    #[test]
+    fn test_vectorize_to_applies_optimization() {
+        let img = RgbaImage::from_fn(16, 16, |x, y| {
+            image::Rgba([(x % 4 * 60) as u8, (y % 4 * 60) as u8, 0, 255])
+        });
+        let run = |optimize| {
+            let req = VectorizeRequest::new(img.clone())
+                .with_engine(Engine::Spline)
+                .with_optimize(optimize);
+            let mut buf = Vec::new();
+            let res = vectorize_to(&mut buf, &req).unwrap();
+            (buf, res.metadata)
+        };
+        let (raw, raw_meta) = run(false);
+        let (opt, opt_meta) = run(true);
+        assert!(
+            opt.len() < raw.len() || opt_meta.path_count < raw_meta.path_count,
+            "optimized {}B/{} paths vs raw {}B/{} paths",
+            opt.len(),
+            opt_meta.path_count,
+            raw.len(),
+            raw_meta.path_count
+        );
+        assert_eq!(opt_meta.svg_byte_size, opt.len());
+        assert_eq!(
+            opt_meta.path_count,
+            count_svg_paths(std::str::from_utf8(&opt).unwrap())
+        );
     }
 
     #[test]
