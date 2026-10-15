@@ -158,6 +158,18 @@ pub fn vectorize(request: &VectorizeRequest) -> Result<VectorizeResult> {
     })
 }
 
+fn render<W: std::io::Write>(
+    writer: &mut W,
+    engine: Engine,
+    request: &VectorizeRequest,
+) -> Result<pixel_exact::VectorizeMeta> {
+    match engine {
+        Engine::PixelExact => pixel_exact::vectorize_to(writer, &request.image),
+        Engine::Spline => spline::vectorize_to(writer, &request.image, &request.config),
+        Engine::Auto => unreachable!(),
+    }
+}
+
 /// Streaming vectorization — writes SVG directly to a writer instead of returning a String.
 /// For PixelExact: SVG is written incrementally during assembly.
 /// For Spline: vtracer builds in memory, but result is written directly to the writer.
@@ -174,16 +186,17 @@ pub fn vectorize_to<W: std::io::Write>(
     let (w, h) = (request.image.width(), request.image.height());
     let raw_pixel_bytes = (w as usize * h as usize) * 4;
 
-    let (svg_byte_size, path_count) = match engine {
-        Engine::PixelExact => {
-            let m = pixel_exact::vectorize_to(writer, &request.image)?;
-            (m.byte_count, m.path_count)
-        }
-        Engine::Spline => {
-            let m = spline::vectorize_to(writer, &request.image, &request.config)?;
-            (m.byte_count, m.path_count)
-        }
-        Engine::Auto => unreachable!(),
+    // Optimization needs the whole SVG, so buffer it and write the result once.
+    let (svg_byte_size, path_count) = if request.config.optimize {
+        let mut buf = Vec::new();
+        render(&mut buf, engine, request)?;
+        let raw = String::from_utf8(buf).map_err(|e| Error::Optimization(e.to_string()))?;
+        let svg = optimize_svg(&raw, &request.config.optimize_config)?;
+        writer.write_all(svg.as_bytes())?;
+        (svg.len(), count_svg_paths(&svg))
+    } else {
+        let m = render(writer, engine, request)?;
+        (m.byte_count, m.path_count)
     };
 
     let elapsed = start.elapsed();
@@ -244,6 +257,144 @@ mod tests {
         let result = vectorize(&req).unwrap();
         assert!(result.svg.contains("<svg"));
         assert_eq!(result.engine_used, Engine::Spline);
+    }
+
+    #[test]
+    fn test_vectorize_to_applies_optimization() {
+        let img = RgbaImage::from_fn(16, 16, |x, y| {
+            image::Rgba([(x % 4 * 60) as u8, (y % 4 * 60) as u8, 0, 255])
+        });
+        let run = |optimize| {
+            let req = VectorizeRequest::new(img.clone())
+                .with_engine(Engine::Spline)
+                .with_optimize(optimize);
+            let mut buf = Vec::new();
+            let res = vectorize_to(&mut buf, &req).unwrap();
+            (buf, res.metadata)
+        };
+        let (raw, raw_meta) = run(false);
+        let (opt, opt_meta) = run(true);
+        assert!(
+            opt.len() < raw.len() || opt_meta.path_count < raw_meta.path_count,
+            "optimized {}B/{} paths vs raw {}B/{} paths",
+            opt.len(),
+            opt_meta.path_count,
+            raw.len(),
+            raw_meta.path_count
+        );
+        assert_eq!(opt_meta.svg_byte_size, opt.len());
+        assert_eq!(
+            opt_meta.path_count,
+            count_svg_paths(std::str::from_utf8(&opt).unwrap())
+        );
+    }
+
+    #[test]
+    fn test_parity_vectorize_vs_vectorize_to() {
+        // Anti-divergence lock (issue #45): both public entry points must
+        // produce identical SVG bytes and equal metadata for the same request.
+        // This is the failure class behind #42 (streaming skipped optimize).
+        let rgba = image::Rgba;
+        let mixed = RgbaImage::from_fn(24, 18, |x, y| {
+            rgba([
+                (x * 7 % 256) as u8,
+                (y * 11 % 256) as u8,
+                ((x + y) % 256) as u8,
+                if y < 4 { 128 } else { 255 },
+            ])
+        });
+        // several translucent alpha groups
+        let multi_alpha = RgbaImage::from_fn(16, 16, |x, y| {
+            let a = [64, 128, 200, 255][(x / 4) as usize % 4];
+            rgba([(x * 16) as u8, (y * 16) as u8, 90, a])
+        });
+        // fully transparent pixels (a == 0) mixed with opaque ones
+        let holes = RgbaImage::from_fn(12, 12, |x, y| {
+            if (x + y) % 3 == 0 {
+                rgba([9, 9, 9, 0])
+            } else {
+                rgba([(x * 20) as u8, (y * 20) as u8, 40, 255])
+            }
+        });
+        let one = RgbaImage::from_pixel(1, 1, rgba([10, 200, 30, 255]));
+        let icon = RgbaImage::from_fn(16, 16, |x, y| {
+            rgba([if (x / 4 + y / 4) % 2 == 0 { 255 } else { 0 }, 0, 0, 255])
+        });
+
+        type Tweak = fn(&mut VectorizeConfig);
+        let tweaks: [(&str, Tweak); 7] = [
+            ("default", |_| {}),
+            ("binary", |c| c.color_mode = Some(ColorMode::Binary)),
+            ("cutout", |c| {
+                c.hierarchical = Some(HierarchicalMode::Cutout)
+            }),
+            ("speckle", |c| c.filter_speckle = Some(8)),
+            ("poster", |c| c.spline_preset = Some(SplinePreset::Poster)),
+            ("opt-safe", |c| {
+                c.optimize_config.preset = OptimizePreset::Safe
+            }),
+            ("opt-none", |c| {
+                c.optimize_config.preset = OptimizePreset::None
+            }),
+        ];
+        let images = [
+            ("mixed", &mixed),
+            ("multi_alpha", &multi_alpha),
+            ("holes", &holes),
+            ("1x1", &one),
+        ];
+
+        let mut cases = Vec::new();
+        for (iname, img) in images {
+            for engine in [Engine::PixelExact, Engine::Spline] {
+                for (tname, tweak) in tweaks {
+                    for optimize in [false, true] {
+                        let name = format!("{iname}/{engine:?}/{tname}/opt={optimize}");
+                        cases.push((name, img, engine, tweak, optimize));
+                    }
+                }
+            }
+        }
+        // Engine::Auto (resolves to PixelExact for the small icon)
+        for optimize in [false, true] {
+            let name = format!("icon/Auto/default/opt={optimize}");
+            cases.push((name, &icon, Engine::Auto, tweaks[0].1, optimize));
+        }
+
+        for (name, img, engine, tweak, optimize) in cases {
+            let mut req = VectorizeRequest::new(img.clone())
+                .with_engine(engine)
+                .with_optimize(optimize);
+            tweak(&mut req.config);
+
+            let buffered = vectorize(&req).unwrap();
+            let mut sink = Vec::new();
+            let streamed = vectorize_to(&mut sink, &req).unwrap();
+            let (bm, sm) = (&buffered.metadata, &streamed.metadata);
+
+            assert_eq!(
+                buffered.svg.as_bytes(),
+                sink.as_slice(),
+                "{name}: SVG bytes"
+            );
+            assert_eq!(buffered.engine_used, streamed.engine_used, "{name}: engine");
+            assert_eq!(bm.svg_byte_size, sm.svg_byte_size, "{name}: svg_byte_size");
+            assert_eq!(bm.path_count, sm.path_count, "{name}: path_count");
+            assert_eq!(bm.compression_ratio, sm.compression_ratio, "{name}: ratio");
+            assert_eq!(bm.input_size, sm.input_size, "{name}: input_size");
+
+            // Ground truth: metadata must match what was actually written.
+            assert_eq!(
+                sm.svg_byte_size,
+                sink.len(),
+                "{name}: size != written bytes"
+            );
+            assert_eq!(
+                sm.path_count,
+                count_svg_paths(std::str::from_utf8(&sink).unwrap()),
+                "{name}: path_count != '<path' in written bytes"
+            );
+        }
     }
 
     #[test]

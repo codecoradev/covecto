@@ -79,7 +79,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build release binaries
-        run: cargo build --release --target ${{ matrix.target }} -p covecto -p covecto-api
+        run: cargo build --release --locked --target ${{ matrix.target }} -p covecto -p covecto-api
 
       - name: Strip binaries (Unix)
         if: runner.os != 'Windows'
