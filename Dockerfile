@@ -27,7 +27,7 @@ COPY crates/cli/Cargo.toml crates/cli/Cargo.toml
 COPY crates/api/Cargo.toml crates/api/Cargo.toml
 
 # Build dependencies only (will fail on missing code, but deps get cached)
-RUN cargo build --release 2>/dev/null || true
+RUN cargo build --release --locked 2>/dev/null || true
 
 # Real source code
 COPY crates/ ./crates/
@@ -35,7 +35,7 @@ COPY crates/ ./crates/
 # Touch real sources to invalidate dummy builds and trigger real compilation
 RUN touch crates/core/src/lib.rs crates/cli/src/main.rs crates/api/src/lib.rs
 
-RUN cargo build --release --bin covecto
+RUN cargo build --release --locked --bin covecto
 
 # ── Stage 2: Runtime ────────────────────────────────────────────────────
 FROM debian:bookworm-slim
