@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-15
+
+### Fixed
+- Streaming path (`vectorize_to`) now applies SVG optimization when `optimize` is enabled; it was silently skipped, so CLI SVG output was unoptimized (#43)
+- PixelExact streaming metadata: `svg_byte_size` off-by-one and `path_count` double-counting translucent paths (#47)
+
+### Changed
+- CI (check, clippy, test, build), release workflow and Dockerfile build with `--locked`; `Cargo.lock` synced with the workspace version (#46, #50)
+- Parity test between `vectorize()` and `vectorize_to()`: 58 cases, config matrix, ground-truth counter assertions (#47, #49)
+
 ## [0.1.1] - 2026-07-24
 
 ### Added
@@ -37,5 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Contributors
 - @ajianaz — initial release (#23, #24, #25, #26, #27, #28)
 
-[Unreleased]: https://github.com/codecoradev/covecto/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/codecoradev/covecto/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/codecoradev/covecto/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/codecoradev/covecto/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/codecoradev/covecto/releases/tag/v0.1.0

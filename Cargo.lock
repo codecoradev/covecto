@@ -467,7 +467,7 @@ dependencies = [
 
 [[package]]
 name = "covecto"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap 4.6.4",
@@ -487,7 +487,7 @@ dependencies = [
 
 [[package]]
 name = "covecto-api"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -504,7 +504,7 @@ dependencies = [
 
 [[package]]
 name = "covecto-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "image 0.25.10",
  "pngtosvg",
