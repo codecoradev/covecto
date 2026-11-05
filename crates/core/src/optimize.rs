@@ -208,7 +208,12 @@ fn remove_empty_elements(s: &str, name: &str) -> Option<String> {
 
 /// Remove XML prolog `<?xml ...?>`.
 fn remove_xml_prolog(s: &str) -> Option<String> {
-    let idx = s.find("<?xml")?;
+    // Only the XML declaration itself (`<?xml` + whitespace), not other
+    // processing instructions such as `<?xml-stylesheet ...?>`.
+    let idx = s
+        .match_indices("<?xml")
+        .map(|(i, _)| i)
+        .find(|&i| s.as_bytes().get(i + 5).is_some_and(u8::is_ascii_whitespace))?;
     let end = s[idx..].find("?>")?;
     let mut result = String::with_capacity(s.len());
     result.push_str(&s[..idx]);
@@ -510,6 +515,17 @@ mod tests {
 <svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"></svg>"#;
         let expected = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"></svg>"#;
         assert_eq!(remove_xml_prolog(input).unwrap(), expected);
+    }
+
+    #[test]
+    fn test_xml_stylesheet_pi_is_kept() {
+        let input = "<?xml-stylesheet href=\"a.css\"?><svg/>";
+        assert_eq!(remove_xml_prolog(input), None);
+        let both = "<?xml version=\"1.0\"?>\n<?xml-stylesheet href=\"a.css\"?><svg/>";
+        assert_eq!(
+            remove_xml_prolog(both).unwrap(),
+            "<?xml-stylesheet href=\"a.css\"?><svg/>"
+        );
     }
 
     #[test]
@@ -880,9 +896,9 @@ mod tests {
         // Property test with an independent oracle: usvg's path parser must
         // see identical geometry before and after number shortening.
         const TOKENS: &[&str] = &[
-            "M", "m", "L", "l", "H", "v", "C", "s", "Q", "t", "A", "a", "Z", " ", ",", "-",
-            ".", "0", "1", "5", "9", "00", ".0", "1.0", "2.50", "3.", "e", "E", "e-", "1e1",
-            "0", "1", ".5",
+            "M", "m", "L", "l", "H", "v", "C", "s", "Q", "t", "A", "a", "Z", " ", ",", "-", ".",
+            "0", "1", "5", "9", "00", ".0", "1.0", "2.50", "3.", "e", "E", "e-", "1e1", "0", "1",
+            ".5",
         ];
         fn geometry(d: &str) -> String {
             let svg = format!(
