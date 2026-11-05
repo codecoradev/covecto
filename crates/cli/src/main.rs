@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use clap::{Parser, Subcommand};
 use covecto_core::{
-    Engine, ImageLimits, OutputFormat, VectorizeConfig, convert_output, load_image, options,
-    select_engine, vectorize, vectorize_to,
+    Engine, ImageLimits, OutputFormat, RenderResult, VectorizeConfig, load_image, options,
+    render_to, select_engine,
 };
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
@@ -216,19 +216,13 @@ struct JsonResult {
 }
 
 impl JsonResult {
-    fn from_result(
-        input: &Path,
-        output: &Path,
-        result: &covecto_core::VectorizeResult,
-        format: &OutputFormat,
-        output_bytes: usize,
-    ) -> Self {
+    fn from_result(input: &Path, output: &Path, result: &RenderResult) -> Self {
         Self {
             path: input.display().to_string(),
             output: output.display().to_string(),
             engine: result.engine_used.to_string(),
-            format: format.extension().to_string(),
-            bytes: output_bytes,
+            format: result.format.extension().to_string(),
+            bytes: result.bytes_written,
             paths: result.metadata.path_count,
             time_ms: result.metadata.processing_time_ms,
             input_size: result.metadata.input_size,
@@ -242,16 +236,16 @@ fn apply_output_template(template: &str, stem: &str, ext: &str) -> String {
     template.replace("{stem}", stem).replace("{ext}", ext)
 }
 
-/// Vectorize a single file and optionally write output.
-/// Returns the result and output bytes for JSON reporting.
-/// Uses streaming I/O for SVG output to avoid holding full SVG in memory.
+/// Vectorize one file into `output` (or next to the input) in `format`.
+/// Returns the render result and the output path. On failure no partial
+/// output file is left behind.
 fn vectorize_single_raw(
     input: &Path,
     output: Option<&Path>,
     config: &VectorizeConfig,
     format: &OutputFormat,
     limits: ImageLimits,
-) -> anyhow::Result<(covecto_core::VectorizeResult, usize, PathBuf)> {
+) -> anyhow::Result<(RenderResult, PathBuf)> {
     let img = load_image(input, limits)?;
     let req = covecto_core::VectorizeRequest::new(img).with_config(config.clone());
 
@@ -259,11 +253,10 @@ fn vectorize_single_raw(
         Some(p) => p.to_path_buf(),
         None => {
             let stem = input.file_stem().unwrap().to_string_lossy().to_string();
-            let ext = format.extension();
             input
                 .parent()
                 .unwrap_or(Path::new("."))
-                .join(format!("{stem}.{ext}"))
+                .join(format!("{stem}.{}", format.extension()))
         }
     };
 
@@ -271,26 +264,20 @@ fn vectorize_single_raw(
         std::fs::create_dir_all(parent)?;
     }
 
-    let (bytes, result) = if *format == OutputFormat::Svg {
-        // Streaming path: write SVG directly to file via BufWriter
-        let file = std::fs::File::create(&out_path)?;
-        let mut writer = std::io::BufWriter::new(file);
-        let stream_result = vectorize_to(&mut writer, &req)?;
+    // core picks the strategy per format (SVG streams; PDF/EPS convert in
+    // memory first).
+    let rendered = (|| -> anyhow::Result<RenderResult> {
+        let mut writer = std::io::BufWriter::new(std::fs::File::create(&out_path)?);
+        let result = render_to(&mut writer, &req, *format)?;
         writer.flush()?;
-        let svg_bytes = stream_result.metadata.svg_byte_size;
-        // Wrap in VectorizeResult for JSON reporting
-        let result = covecto_core::VectorizeResult {
-            svg: String::new(), // not needed for file output
-            engine_used: stream_result.engine_used,
-            metadata: stream_result.metadata,
-        };
-        (svg_bytes, result)
-    } else {
-        // Non-SVG formats need the String for convert_output
-        let result = vectorize(&req)?;
-        let (bytes, _content_type) = convert_output(&result.svg, *format)?;
-        std::fs::write(&out_path, &bytes)?;
-        (bytes.len(), result)
+        Ok(result)
+    })();
+    let result = match rendered {
+        Ok(result) => result,
+        Err(e) => {
+            let _ = std::fs::remove_file(&out_path);
+            return Err(e);
+        }
     };
 
     info!(
@@ -298,13 +285,13 @@ fn vectorize_single_raw(
         input.display(),
         out_path.display(),
         result.metadata.processing_time_ms,
-        bytes,
+        result.bytes_written,
         result.metadata.path_count,
         result.engine_used,
         format.extension(),
     );
 
-    Ok((result, bytes, out_path))
+    Ok((result, out_path))
 }
 
 fn make_spinner(msg: &str) -> ProgressBar {
@@ -505,11 +492,11 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
             };
 
             match vectorize_single_raw(file, Some(&out_path), &config, &format, opts.limits) {
-                Ok((result, bytes, out)) => {
+                Ok((result, out)) => {
                     if let Some(s) = spinner {
                         s.finish_and_clear();
                     }
-                    let json_result = JsonResult::from_result(file, &out, &result, &format, bytes);
+                    let json_result = JsonResult::from_result(file, &out, &result);
                     let json_output = if opts.json_pretty {
                         serde_json::to_string_pretty(&json_result)?
                     } else {
@@ -545,9 +532,9 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
             // No --output and no --json: write to stdout (backward compat)
             let img = load_image(file, opts.limits)?;
             let req = covecto_core::VectorizeRequest::new(img).with_config(config.clone());
-            let result = vectorize(&req)?;
-            let (bytes, _ct) = convert_output(&result.svg, format)?;
-            std::io::Write::write_all(&mut std::io::stdout(), &bytes)?;
+            let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
+            render_to(&mut stdout, &req, format)?;
+            stdout.flush()?;
         }
 
         return Ok(());
@@ -653,13 +640,10 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
                 p.inc(1);
             }
             match res {
-                Ok((result, bytes, out)) => {
+                Ok((result, out)) => {
                     count.fetch_add(1, Ordering::Relaxed);
                     if opts.json {
-                        Some((
-                            idx,
-                            JsonResult::from_result(file, &out, &result, &format, bytes),
-                        ))
+                        Some((idx, JsonResult::from_result(file, &out, &result)))
                     } else {
                         None
                     }
@@ -1061,6 +1045,45 @@ mod tests {
         let unlimited = opts_of(&["covecto", i, "-o", o, "--max-dimension", "0"]);
         cmd_vectorize(&input, &unlimited).unwrap();
         assert!(out.exists());
+    }
+
+    #[test]
+    fn every_format_goes_through_core_render() {
+        let tmp = TempDir::new("formats");
+        let input = fixture("icon-32x32.png");
+        let config = config_of(&["covecto", "x.png"]).unwrap();
+        for (format, magic) in [
+            (OutputFormat::Svg, b"<svg".as_slice()),
+            (OutputFormat::Pdf, b"%PDF".as_slice()),
+            (OutputFormat::Eps, b"%!PS".as_slice()),
+        ] {
+            let out = tmp.0.join(format!("o.{}", format.extension()));
+            let (result, path) =
+                vectorize_single_raw(&input, Some(&out), &config, &format, ImageLimits::default())
+                    .unwrap();
+            let written = std::fs::read(&path).unwrap();
+            assert!(written.starts_with(magic), "{format:?}");
+            assert_eq!(result.bytes_written, written.len(), "{format:?}");
+            assert_eq!(result.format, format);
+        }
+    }
+
+    #[test]
+    fn failed_render_leaves_no_partial_file() {
+        let tmp = TempDir::new("partial");
+        let input = tmp.0.join("broken.png");
+        std::fs::write(&input, b"not a png").unwrap();
+        let out = tmp.0.join("o.svg");
+        let config = config_of(&["covecto", "x.png"]).unwrap();
+        let err = vectorize_single_raw(
+            &input,
+            Some(&out),
+            &config,
+            &OutputFormat::Svg,
+            ImageLimits::default(),
+        );
+        assert!(err.is_err());
+        assert!(!out.exists());
     }
 
     #[test]

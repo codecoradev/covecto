@@ -5,8 +5,8 @@ use axum::{
     response::{IntoResponse, Json, Response},
 };
 use covecto_core::{
-    ImageLimits, OptimizeConfig, OptimizePreset, OutputFormat, VectorizeRequest, convert_output,
-    load_image, optimize_svg, vectorize as core_vectorize,
+    ImageLimits, OptimizeConfig, OptimizePreset, OutputFormat, VectorizeRequest, load_image,
+    optimize_svg, render_to,
 };
 use serde::Serialize;
 use tracing::info;
@@ -105,7 +105,7 @@ pub async fn vectorize_handler(
 
     // Decode, vectorize and convert off the async runtime (#55).
     let max_dimension = state.limits().max_dimension;
-    let (result, converted) = state
+    let (result, body) = state
         .run_job(ticket, move || -> Result<_, AppError> {
             // Decode errors are the client's input (4xx); errors after a
             // successful decode are ours (5xx).
@@ -113,13 +113,10 @@ pub async fn vectorize_handler(
                 load_image(&data[..], ImageLimits { max_dimension }).map_err(AppError::Decode)?;
             drop(data);
             let req = VectorizeRequest::new(img).with_config(config);
-            let result = core_vectorize(&req).map_err(AppError::Core)?;
-            let converted = if output_format == OutputFormat::Svg {
-                None
-            } else {
-                Some(convert_output(&result.svg, output_format).map_err(AppError::Core)?)
-            };
-            Ok((result, converted))
+            // core handles every format (SVG streams, PDF/EPS convert).
+            let mut body = Vec::new();
+            let result = render_to(&mut body, &req, output_format).map_err(AppError::Core)?;
+            Ok((result, body))
         })
         .await
         .map_err(AppError::from)??;
@@ -134,14 +131,17 @@ pub async fn vectorize_handler(
         result.metadata.path_count,
     );
 
-    // Non-SVG formats: return raw bytes with content-type header
-    if let Some((bytes, content_type)) = converted {
-        return Ok(([("content-type", content_type.as_str())], bytes).into_response());
+    // Non-SVG formats: return raw bytes with their content type.
+    if output_format != OutputFormat::Svg {
+        return Ok(([("content-type", output_format.content_type())], body).into_response());
     }
 
-    // Default: JSON with SVG string
+    // Default: JSON with SVG string. covecto's SVG output is ASCII, so this
+    // conversion cannot fail in practice; treat a failure as our error.
+    let svg = String::from_utf8(body)
+        .map_err(|e| AppError::Core(covecto_core::Error::Conversion(e.to_string())))?;
     Ok(Json(VectorizeResponse {
-        svg: result.svg,
+        svg,
         engine_used: result.engine_used.to_string(),
         metadata: serde_json::to_value(result.metadata).unwrap_or_default(),
     })

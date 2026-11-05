@@ -66,6 +66,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Writing any output format
+
+`render_to` vectorizes straight into a writer in SVG, PDF or EPS. SVG is
+streamed; PDF/EPS are converted in memory and written at once, so a failed
+conversion writes nothing:
+
+```rust
+use covecto_core::{render_to, OutputFormat, VectorizeRequest};
+
+let mut file = std::io::BufWriter::new(std::fs::File::create("out.pdf")?);
+let result = render_to(&mut file, &VectorizeRequest::new(img), OutputFormat::Pdf)?;
+println!("{} bytes, engine {}, MIME {}", result.bytes_written, result.engine_used, result.format.content_type());
+```
+
 ## Loading images safely
 
 `load_image` decodes a file or bytes to RGBA and checks the size from the
