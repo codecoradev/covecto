@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (engine preview)
+- `--dry-run` shows the engine a real run would use: it calls core's new `select_engine` (also used by `vectorize`/`vectorize_to`) instead of a size-only guess that ignored `--engine`, `--profile` and the color heuristic. With an `auto` engine each image is decoded (in parallel) and marked `(auto)`; this replaces the "never decode" rule of #21
+- **Breaking (CLI):** a batch with failed files, and a dry run with unreadable files, now exits with code 1 (it exited 0 after printing the errors)
+
+### Added (engine preview)
+- `covecto_core::select_engine(config, image)`: the Engine that will actually run
+
 ### Changed (Options, ADR 0001)
 - **Breaking:** Options are resolved in one place, `covecto_core::options::resolve`, for the CLI, the API and library users. Precedence is defaults < Preset < Profile < Explicit options, in any order, as `docs/configuration.md` always said: `--profile icon --corner-threshold 120` now gives 120 (was 80), and `--engine pixel-exact --profile icon` runs PixelExact (the profile used to overwrite it)
 - **Breaking:** a Preset is a starting point: `--preset poster --filter-speckle 8` keeps 8 (individual parameters used to be discarded). `VectorizeConfig::spline_preset` is removed; `apply_profile` is no longer public

@@ -87,8 +87,21 @@ covecto ./icons/ --json-pretty
 
 ## Dry Run
 
-Preview what would be processed:
+Preview what would be processed, without writing anything:
 
 ```bash
 covecto ./assets/ --recursive --dry-run
 ```
+
+```
+Would process 3 files:
+  assets/icon.png → assets/vectorized/icon.svg (engine: pixel-exact (auto))
+  assets/photo.jpg → assets/vectorized/photo.svg (engine: spline (auto))
+  assets/broken.png → error: ...
+```
+
+The engine shown is exactly the one a real run would use: with `--engine` or a
+`--profile` it is shown as configured, without reading the files; with the
+default `auto` engine each image is decoded (in parallel) and the same
+auto-selection runs as in a real conversion, marked `(auto)`. Unreadable files
+are listed with their error, and the dry run then exits with code 1.

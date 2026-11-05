@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use clap::{Parser, Subcommand};
 use covecto_core::{
-    OutputFormat, VectorizeConfig, convert_output, load_image, options, vectorize, vectorize_to,
+    Engine, OutputFormat, VectorizeConfig, convert_output, load_image, options, select_engine,
+    vectorize, vectorize_to,
 };
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
@@ -428,18 +429,20 @@ fn compute_output_path(
 }
 
 /// Lightweight engine detection for dry-run (reads image dimensions without full decode).
-fn detect_engine_preview(path: &Path) -> String {
-    match image::image_dimensions(path) {
-        Ok((w, h)) => {
-            if w <= 256 && h <= 256 {
-                "pixel-exact".to_string()
-            } else {
-                "spline".to_string()
-            }
-        }
-        Err(_) => "auto".to_string(),
+/// The Engine a real run would use for `file`, as shown by `--dry-run`.
+///
+/// Uses core's `select_engine`, the same decision `vectorize` makes, so the
+/// preview cannot drift from a real run. Only an `Auto` Engine needs the
+/// image's pixels; a configured Engine (flag or Profile) is shown without
+/// reading the file.
+fn preview_engine(file: &Path, config: &VectorizeConfig) -> anyhow::Result<String> {
+    if config.engine != Engine::Auto {
+        return Ok(config.engine.to_string());
     }
+    let img = load_image(file)?;
+    Ok(format!("{} (auto)", select_engine(config, &img)))
 }
+
 fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
     let config = opts.to_config()?;
     let format = parse_output_format(&opts.format)?;
@@ -462,7 +465,8 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
                 let stem = file.file_stem().unwrap().to_string_lossy().to_string();
                 PathBuf::from(apply_output_template(template, &stem, ext))
             });
-            let engine = detect_engine_preview(file);
+            let engine = preview_engine(file, &config)
+                .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", file.display()))?;
             println!(
                 "Would process: {} → {} (engine: {}, format: {})",
                 file.display(),
@@ -551,17 +555,32 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
 
     // Dry-run: just list files
     if opts.dry_run {
+        // Decoding (only needed for an Auto Engine) runs in parallel; the
+        // listing keeps input order.
+        let previews: Vec<anyhow::Result<String>> = files
+            .par_iter()
+            .map(|file| preview_engine(file, &config))
+            .collect();
         println!("Would process {} files:", files.len());
-        for file in &files {
+        let mut unreadable = 0usize;
+        for (file, preview) in files.iter().zip(previews) {
             let out_path =
                 compute_output_path(file, root, &out_dir, template, ext, preserve_structure);
-            let engine = detect_engine_preview(file);
-            println!(
-                "  {} → {} (engine: {})",
-                file.display(),
-                out_path.display(),
-                engine
-            );
+            match preview {
+                Ok(engine) => println!(
+                    "  {} → {} (engine: {})",
+                    file.display(),
+                    out_path.display(),
+                    engine
+                ),
+                Err(e) => {
+                    unreadable += 1;
+                    println!("  {} → error: {e}", file.display());
+                }
+            }
+        }
+        if unreadable > 0 {
+            anyhow::bail!("{unreadable} of {} files could not be read", files.len());
         }
         return Ok(());
     }
@@ -678,6 +697,10 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
         println!("{json_output}");
     }
 
+    // Failures are reported above, per file; the exit code must say so too.
+    if error_count > 0 {
+        anyhow::bail!("{error_count} of {} files failed", files.len());
+    }
     Ok(())
 }
 
@@ -891,6 +914,75 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("--profile") && e.contains("icon, logo"), "{e}");
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures")
+            .join(name)
+    }
+
+    fn opts_of(args: &[&str]) -> VectorizeOpts {
+        match parse(args).unwrap().command {
+            Commands::Vectorize(a) => from_args(*a),
+            Commands::Serve { .. } => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn preview_matches_core_selection() {
+        // A configured Engine is shown without reading the file at all.
+        let spline = config_of(&["covecto", "x.png", "--engine", "spline"]).unwrap();
+        assert_eq!(
+            preview_engine(Path::new("/does/not/exist.png"), &spline).unwrap(),
+            "spline"
+        );
+        let profile = config_of(&["covecto", "x.png", "--profile", "icon"]).unwrap();
+        assert_eq!(
+            preview_engine(Path::new("/does/not/exist.png"), &profile).unwrap(),
+            "spline"
+        );
+        // Auto: the preview is exactly core's decision for this image.
+        let auto = config_of(&["covecto", "x.png"]).unwrap();
+        for name in [
+            "icon-16x16.png",
+            "photo-gradient-64.png",
+            "shapes-512x512.png",
+        ] {
+            let file = fixture(name);
+            let expected = select_engine(&auto, &load_image(&file).unwrap());
+            assert_eq!(
+                preview_engine(&file, &auto).unwrap(),
+                format!("{expected} (auto)"),
+                "{name}"
+            );
+        }
+        assert!(preview_engine(Path::new("/does/not/exist.png"), &auto).is_err());
+    }
+
+    #[test]
+    fn unreadable_files_fail_dry_run_and_batch() {
+        let dir = std::env::temp_dir().join(format!("covecto-cli-test-{}", std::process::id()));
+        let input = dir.join("in");
+        let out = dir.join("out");
+        std::fs::create_dir_all(&input).unwrap();
+        std::fs::copy(fixture("icon-16x16.png"), input.join("good.png")).unwrap();
+        std::fs::write(input.join("broken.png"), b"not a png").unwrap();
+        let (i, o) = (input.to_str().unwrap(), out.to_str().unwrap());
+
+        let dry = opts_of(&["covecto", i, "-o", o, "--dry-run", "--no-progress"]);
+        let err = cmd_vectorize(&input, &dry).unwrap_err().to_string();
+        assert!(err.contains("1 of 2 files could not be read"), "{err}");
+
+        let real = opts_of(&["covecto", i, "-o", o, "--no-progress"]);
+        let err = cmd_vectorize(&input, &real).unwrap_err().to_string();
+        assert!(err.contains("1 of 2 files failed"), "{err}");
+        assert!(
+            out.join("good.svg").exists(),
+            "good files are still converted"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
