@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (output formats)
+- New `covecto_core::render_to(writer, request, format) -> RenderResult`: one interface for SVG (streamed), PDF and EPS. The CLI and the API no longer branch on the format themselves; the CLI's JSON report comes from `RenderResult` (no more placeholder result)
+- **Breaking (library):** `convert_output` returns just the bytes; the MIME type is `OutputFormat::content_type()`
+- CLI: output files are written to a temporary file in the same directory and renamed into place on success. A failed conversion leaves no partial or empty file and never touches an existing file at the output path (before, a failed SVG write could leave a partial file). Replacing a file keeps its permissions and a symlink at the output path is followed; hard links to the old file are not updated. An interrupted run may leave a hidden `.covecto-<pid>-<n>.tmp` file in the output directory
+
 ### Changed (image loading)
 - **Breaking (library):** one loader, `load_image(source, ImageLimits)`, replaces `load_image(path)`, `load_image_from_bytes` and `load_image_from_bytes_with_limit`. The source is a path or bytes; the size limit is checked from the header before decoding
 - CLI: images are size-checked before decoding like the API (default 8192 px per side), so a batch can no longer decode a decompression bomb on every thread; `--max-dimension <PX>` changes it (`0` = no limit)

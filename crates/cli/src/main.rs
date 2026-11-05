@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use clap::{Parser, Subcommand};
 use covecto_core::{
-    Engine, ImageLimits, OutputFormat, VectorizeConfig, convert_output, load_image, options,
-    select_engine, vectorize, vectorize_to,
+    Engine, ImageLimits, OutputFormat, RenderResult, VectorizeConfig, load_image, options,
+    render_to, select_engine,
 };
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
@@ -216,19 +216,13 @@ struct JsonResult {
 }
 
 impl JsonResult {
-    fn from_result(
-        input: &Path,
-        output: &Path,
-        result: &covecto_core::VectorizeResult,
-        format: &OutputFormat,
-        output_bytes: usize,
-    ) -> Self {
+    fn from_result(input: &Path, output: &Path, result: &RenderResult) -> Self {
         Self {
             path: input.display().to_string(),
             output: output.display().to_string(),
             engine: result.engine_used.to_string(),
-            format: format.extension().to_string(),
-            bytes: output_bytes,
+            format: result.format.extension().to_string(),
+            bytes: result.bytes_written,
             paths: result.metadata.path_count,
             time_ms: result.metadata.processing_time_ms,
             input_size: result.metadata.input_size,
@@ -242,16 +236,53 @@ fn apply_output_template(template: &str, stem: &str, ext: &str) -> String {
     template.replace("{stem}", stem).replace("{ext}", ext)
 }
 
-/// Vectorize a single file and optionally write output.
-/// Returns the result and output bytes for JSON reporting.
-/// Uses streaming I/O for SVG output to avoid holding full SVG in memory.
+/// Create a new, unique temporary file next to `target` (same filesystem,
+/// so the final rename is atomic). Uses `create_new`, so it never follows a
+/// symlink or reuses an existing file; the name is short so a long target
+/// name cannot push it past filesystem limits.
+fn create_temp_sibling(target: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = target.parent().unwrap_or(Path::new("."));
+    loop {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!(".covecto-{}-{n}.tmp", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Where the output really goes: an existing symlink at `out_path` is
+/// followed, so its target is replaced and the link stays intact.
+fn resolve_output(out_path: &Path) -> PathBuf {
+    match std::fs::symlink_metadata(out_path) {
+        Ok(m) if m.file_type().is_symlink() => {
+            std::fs::canonicalize(out_path).unwrap_or_else(|_| out_path.to_path_buf())
+        }
+        _ => out_path.to_path_buf(),
+    }
+}
+
+/// Vectorize one file into `output` (or next to the input) in `format`.
+/// Returns the render result and the output path.
+///
+/// The output is written to a temporary file in the same directory and
+/// renamed over `output` only on success, so a failure never leaves a
+/// partial file and never touches a file that already exists there (which
+/// may even be the input image).
 fn vectorize_single_raw(
     input: &Path,
     output: Option<&Path>,
     config: &VectorizeConfig,
     format: &OutputFormat,
     limits: ImageLimits,
-) -> anyhow::Result<(covecto_core::VectorizeResult, usize, PathBuf)> {
+) -> anyhow::Result<(RenderResult, PathBuf)> {
     let img = load_image(input, limits)?;
     let req = covecto_core::VectorizeRequest::new(img).with_config(config.clone());
 
@@ -259,11 +290,10 @@ fn vectorize_single_raw(
         Some(p) => p.to_path_buf(),
         None => {
             let stem = input.file_stem().unwrap().to_string_lossy().to_string();
-            let ext = format.extension();
             input
                 .parent()
                 .unwrap_or(Path::new("."))
-                .join(format!("{stem}.{ext}"))
+                .join(format!("{stem}.{}", format.extension()))
         }
     };
 
@@ -271,26 +301,33 @@ fn vectorize_single_raw(
         std::fs::create_dir_all(parent)?;
     }
 
-    let (bytes, result) = if *format == OutputFormat::Svg {
-        // Streaming path: write SVG directly to file via BufWriter
-        let file = std::fs::File::create(&out_path)?;
-        let mut writer = std::io::BufWriter::new(file);
-        let stream_result = vectorize_to(&mut writer, &req)?;
+    // core picks the strategy per format (SVG streams; PDF/EPS convert in
+    // memory first). Write next to the target, then rename into place.
+    let target = resolve_output(&out_path);
+    let (tmp_path, tmp_file) = create_temp_sibling(&target)?;
+    let mut writer = std::io::BufWriter::new(tmp_file);
+    let rendered = (|| -> anyhow::Result<RenderResult> {
+        let result = render_to(&mut writer, &req, *format)?;
         writer.flush()?;
-        let svg_bytes = stream_result.metadata.svg_byte_size;
-        // Wrap in VectorizeResult for JSON reporting
-        let result = covecto_core::VectorizeResult {
-            svg: String::new(), // not needed for file output
-            engine_used: stream_result.engine_used,
-            metadata: stream_result.metadata,
-        };
-        (svg_bytes, result)
-    } else {
-        // Non-SVG formats need the String for convert_output
-        let result = vectorize(&req)?;
-        let (bytes, _content_type) = convert_output(&result.svg, *format)?;
-        std::fs::write(&out_path, &bytes)?;
-        (bytes.len(), result)
+        Ok(result)
+    })();
+    drop(writer); // close before rename (required on Windows)
+    let result = match rendered.and_then(|r| {
+        // Replacing a file keeps its permissions.
+        if let Ok(meta) = std::fs::metadata(&target)
+            && meta.is_file()
+        {
+            std::fs::set_permissions(&tmp_path, meta.permissions())?;
+        }
+        std::fs::rename(&tmp_path, &target)?;
+        Ok(r)
+    }) {
+        Ok(result) => result,
+        Err(e) => {
+            // Only our own temporary file is removed; `out_path` is untouched.
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e);
+        }
     };
 
     info!(
@@ -298,13 +335,13 @@ fn vectorize_single_raw(
         input.display(),
         out_path.display(),
         result.metadata.processing_time_ms,
-        bytes,
+        result.bytes_written,
         result.metadata.path_count,
         result.engine_used,
         format.extension(),
     );
 
-    Ok((result, bytes, out_path))
+    Ok((result, out_path))
 }
 
 fn make_spinner(msg: &str) -> ProgressBar {
@@ -505,11 +542,11 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
             };
 
             match vectorize_single_raw(file, Some(&out_path), &config, &format, opts.limits) {
-                Ok((result, bytes, out)) => {
+                Ok((result, out)) => {
                     if let Some(s) = spinner {
                         s.finish_and_clear();
                     }
-                    let json_result = JsonResult::from_result(file, &out, &result, &format, bytes);
+                    let json_result = JsonResult::from_result(file, &out, &result);
                     let json_output = if opts.json_pretty {
                         serde_json::to_string_pretty(&json_result)?
                     } else {
@@ -545,9 +582,9 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
             // No --output and no --json: write to stdout (backward compat)
             let img = load_image(file, opts.limits)?;
             let req = covecto_core::VectorizeRequest::new(img).with_config(config.clone());
-            let result = vectorize(&req)?;
-            let (bytes, _ct) = convert_output(&result.svg, format)?;
-            std::io::Write::write_all(&mut std::io::stdout(), &bytes)?;
+            let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
+            render_to(&mut stdout, &req, format)?;
+            stdout.flush()?;
         }
 
         return Ok(());
@@ -653,13 +690,10 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
                 p.inc(1);
             }
             match res {
-                Ok((result, bytes, out)) => {
+                Ok((result, out)) => {
                     count.fetch_add(1, Ordering::Relaxed);
                     if opts.json {
-                        Some((
-                            idx,
-                            JsonResult::from_result(file, &out, &result, &format, bytes),
-                        ))
+                        Some((idx, JsonResult::from_result(file, &out, &result)))
                     } else {
                         None
                     }
@@ -1061,6 +1095,124 @@ mod tests {
         let unlimited = opts_of(&["covecto", i, "-o", o, "--max-dimension", "0"]);
         cmd_vectorize(&input, &unlimited).unwrap();
         assert!(out.exists());
+    }
+
+    #[test]
+    fn every_format_goes_through_core_render() {
+        let tmp = TempDir::new("formats");
+        let input = fixture("icon-32x32.png");
+        let config = config_of(&["covecto", "x.png"]).unwrap();
+        for (format, magic) in [
+            (OutputFormat::Svg, b"<svg".as_slice()),
+            (OutputFormat::Pdf, b"%PDF".as_slice()),
+            (OutputFormat::Eps, b"%!PS".as_slice()),
+        ] {
+            let out = tmp.0.join(format!("o.{}", format.extension()));
+            let (result, path) =
+                vectorize_single_raw(&input, Some(&out), &config, &format, ImageLimits::default())
+                    .unwrap();
+            let written = std::fs::read(&path).unwrap();
+            assert!(written.starts_with(magic), "{format:?}");
+            assert_eq!(result.bytes_written, written.len(), "{format:?}");
+            assert_eq!(result.format, format);
+        }
+    }
+
+    fn leftovers(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".covecto-") && n.ends_with(".tmp"))
+            .collect()
+    }
+
+    #[test]
+    fn existing_output_survives_a_failed_write() {
+        // The render succeeds but moving it into place fails (the target is
+        // a directory): the target must be untouched and no temp file left.
+        let tmp = TempDir::new("survive");
+        let input = fixture("icon-32x32.png");
+        let config = config_of(&["covecto", "x.png"]).unwrap();
+        let target = tmp.0.join("taken.pdf");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("keep.txt"), b"keep").unwrap();
+        let res = vectorize_single_raw(
+            &input,
+            Some(&target),
+            &config,
+            &OutputFormat::Pdf,
+            ImageLimits::default(),
+        );
+        assert!(res.is_err());
+        assert_eq!(std::fs::read(target.join("keep.txt")).unwrap(), b"keep");
+        assert!(leftovers(&tmp.0).is_empty(), "{:?}", leftovers(&tmp.0));
+
+        // An unreadable input never touches an existing output file.
+        let existing = tmp.0.join("o.svg");
+        std::fs::write(&existing, b"previous").unwrap();
+        let broken = tmp.0.join("broken.png");
+        std::fs::write(&broken, b"not a png").unwrap();
+        let res = vectorize_single_raw(
+            &broken,
+            Some(&existing),
+            &config,
+            &OutputFormat::Svg,
+            ImageLimits::default(),
+        );
+        assert!(res.is_err());
+        assert_eq!(std::fs::read(&existing).unwrap(), b"previous");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_keeps_permissions_and_follows_symlinks() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new("perms");
+        let input = fixture("icon-32x32.png");
+        let config = config_of(&["covecto", "x.png"]).unwrap();
+        let real = tmp.0.join("real.svg");
+        std::fs::write(&real, b"previous").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let link = tmp.0.join("link.svg");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        vectorize_single_raw(
+            &input,
+            Some(&link),
+            &config,
+            &OutputFormat::Svg,
+            ImageLimits::default(),
+        )
+        .unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(std::fs::read(&real).unwrap().starts_with(b"<svg"));
+        let mode = std::fs::metadata(&real).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
+        assert!(leftovers(&tmp.0).is_empty());
+    }
+
+    #[test]
+    fn successful_write_replaces_existing_output() {
+        let tmp = TempDir::new("replace");
+        let input = fixture("icon-32x32.png");
+        let config = config_of(&["covecto", "x.png"]).unwrap();
+        let out = tmp.0.join("o.svg");
+        std::fs::write(&out, b"previous").unwrap();
+        vectorize_single_raw(
+            &input,
+            Some(&out),
+            &config,
+            &OutputFormat::Svg,
+            ImageLimits::default(),
+        )
+        .unwrap();
+        assert!(std::fs::read(&out).unwrap().starts_with(b"<svg"));
+        assert!(leftovers(&tmp.0).is_empty());
     }
 
     #[test]

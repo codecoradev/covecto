@@ -168,6 +168,56 @@ pub struct StreamResult {
     pub metadata: ResultMetadata,
 }
 
+/// Result of [`render_to`].
+#[derive(Debug, Clone)]
+pub struct RenderResult {
+    /// Which engine was used.
+    pub engine_used: Engine,
+    /// The output format written.
+    pub format: OutputFormat,
+    /// Bytes written to the writer, in `format`.
+    pub bytes_written: usize,
+    /// Metadata about the vectorization (SVG size and path count refer to
+    /// the SVG, before any PDF/EPS conversion).
+    pub metadata: ResultMetadata,
+}
+
+/// Vectorize `request` and write it to `writer` in `format`.
+///
+/// One interface for every output format: SVG is streamed as it is produced
+/// (see [`vectorize_to`]); PDF and EPS need the whole SVG, so they are
+/// converted in memory and written with a single `write_all`, which means a
+/// failed conversion writes nothing. The MIME type is
+/// [`OutputFormat::content_type`].
+pub fn render_to<W: std::io::Write>(
+    writer: &mut W,
+    request: &VectorizeRequest,
+    format: OutputFormat,
+) -> Result<RenderResult> {
+    match format {
+        OutputFormat::Svg => {
+            let streamed = vectorize_to(writer, request)?;
+            Ok(RenderResult {
+                engine_used: streamed.engine_used,
+                format,
+                bytes_written: streamed.metadata.svg_byte_size,
+                metadata: streamed.metadata,
+            })
+        }
+        OutputFormat::Pdf | OutputFormat::Eps => {
+            let result = vectorize(request)?;
+            let bytes = convert_output(&result.svg, format)?;
+            writer.write_all(&bytes)?;
+            Ok(RenderResult {
+                engine_used: result.engine_used,
+                format,
+                bytes_written: bytes.len(),
+                metadata: result.metadata,
+            })
+        }
+    }
+}
+
 /// Whether the post-vectorize optimizer should run for this engine.
 ///
 /// PixelExact output is already minimal (integer coordinates, no prolog,
@@ -551,6 +601,27 @@ mod tests {
                 vectorize(&req).unwrap().engine_used,
                 select_engine(config, img)
             );
+        }
+    }
+
+    #[test]
+    fn test_render_to_every_format() {
+        let img = RgbaImage::from_fn(24, 16, |x, y| {
+            image::Rgba([(x * 10) as u8, (y * 15) as u8, 60, 255])
+        });
+        let req = VectorizeRequest::new(img);
+        for format in [OutputFormat::Svg, OutputFormat::Pdf, OutputFormat::Eps] {
+            let mut out = Vec::new();
+            let r = render_to(&mut out, &req, format).unwrap();
+            assert_eq!(r.format, format);
+            assert_eq!(r.bytes_written, out.len(), "{format:?}");
+            assert_eq!(r.engine_used, select_engine(&req.config, &req.image));
+            let expected = convert_output(&vectorize(&req).unwrap().svg, format).unwrap();
+            match format {
+                // PDF embeds a creation timestamp/ID; compare the header only.
+                OutputFormat::Pdf => assert!(out.starts_with(b"%PDF")),
+                _ => assert_eq!(out, expected, "{format:?}"),
+            }
         }
     }
 
