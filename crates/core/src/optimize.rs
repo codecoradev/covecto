@@ -112,45 +112,81 @@ fn skip_ws(s: &str, i: usize) -> usize {
 }
 
 /// Remove elements named `name` that are self-closing (`<x .../>`) or
-/// have no content (`<x ...></x>`). Non-empty elements are kept.
+/// have no content (`<x ...></x>`, whitespace only). Non-empty elements are
+/// kept. Nested empties (`<g><g/></g>`) collapse fully.
+///
+/// Single linear pass with a stack of open elements, so deeply nested input
+/// cannot make this quadratic.
 fn remove_empty_elements(s: &str, name: &str) -> Option<String> {
     let close = format!("</{name}>");
-    let mut result: Option<String> = None;
-    // Repeat so that nested empties (`<g><g/></g>`) collapse fully.
-    loop {
-        let cur: &str = result.as_deref().unwrap_or(s);
-        let mut out = String::new();
-        let mut copied = 0;
-        let mut search = 0;
-        let mut changed = false;
-        while let Some(start) = find_tag(cur, name, search) {
-            let Some((end, self_closing)) = tag_end(cur, start) else {
-                break;
-            };
-            let remove_to = if self_closing {
-                Some(end)
-            } else {
-                let after = skip_ws(cur, end);
-                cur[after..]
-                    .starts_with(&close)
-                    .then_some(after + close.len())
-            };
-            match remove_to {
-                Some(to) => {
-                    out.push_str(&cur[copied..start]);
-                    copied = skip_ws(cur, to);
-                    search = copied;
+    let mut out = String::with_capacity(s.len());
+    // (output length before the open tag, element has kept content)
+    let mut stack: Vec<(usize, bool)> = Vec::new();
+    let mut changed = false;
+    let mut i = 0;
+
+    let mark_content = |stack: &mut Vec<(usize, bool)>| {
+        if let Some(top) = stack.last_mut() {
+            top.1 = true;
+        }
+    };
+
+    while i < s.len() {
+        let Some(rel) = s[i..].find('<') else {
+            if !s[i..].trim().is_empty() {
+                mark_content(&mut stack);
+            }
+            out.push_str(&s[i..]);
+            break;
+        };
+        let lt = i + rel;
+        if !s[i..lt].trim().is_empty() {
+            mark_content(&mut stack);
+        }
+        out.push_str(&s[i..lt]);
+
+        if s[lt..].starts_with(&close) {
+            let after = lt + close.len();
+            match stack.pop() {
+                Some((open_at, false)) => {
+                    out.truncate(open_at);
+                    i = skip_ws(s, after);
                     changed = true;
                 }
-                None => search = end,
+                Some((_, true)) => {
+                    out.push_str(&close);
+                    mark_content(&mut stack);
+                    i = after;
+                }
+                None => {
+                    out.push_str(&close);
+                    i = after;
+                }
             }
+            continue;
         }
-        if !changed {
-            return result;
+
+        if find_tag(s, name, lt) == Some(lt)
+            && let Some((end, self_closing)) = tag_end(s, lt)
+        {
+            if self_closing {
+                i = skip_ws(s, end);
+                changed = true;
+            } else {
+                stack.push((out.len(), false));
+                out.push_str(&s[lt..end]);
+                i = end;
+            }
+            continue;
         }
-        out.push_str(&cur[copied..]);
-        result = Some(out);
+
+        // Any other markup counts as content of the enclosing element.
+        mark_content(&mut stack);
+        let end = tag_end(s, lt).map_or(lt + 1, |(end, _)| end);
+        out.push_str(&s[lt..end]);
+        i = end;
     }
+    changed.then_some(out)
 }
 
 /// Remove XML prolog `<?xml ...?>`.
@@ -188,12 +224,12 @@ fn remove_comments(s: &str) -> Option<String> {
 fn remove_metadata_elements(s: &str) -> Option<String> {
     let mut result: Option<String> = None;
     for tag in ["metadata", "title", "desc"] {
+        let cur: &str = result.as_deref().unwrap_or(s);
         let close = format!("</{tag}>");
-        loop {
-            let cur: &str = result.as_deref().unwrap_or(s);
-            let Some(start) = find_tag(cur, tag, 0) else {
-                break;
-            };
+        let mut out = String::new();
+        let mut copied = 0;
+        let mut search = 0;
+        while let Some(start) = find_tag(cur, tag, search) {
             let Some((open_end, self_closing)) = tag_end(cur, start) else {
                 break;
             };
@@ -205,11 +241,13 @@ fn remove_metadata_elements(s: &str) -> Option<String> {
                     None => break,
                 }
             };
-            let trimmed_end = skip_ws(cur, end);
-            let mut next = String::with_capacity(cur.len());
-            next.push_str(&cur[..start]);
-            next.push_str(&cur[trimmed_end..]);
-            result = Some(next);
+            out.push_str(&cur[copied..start]);
+            copied = skip_ws(cur, end);
+            search = copied;
+        }
+        if copied > 0 {
+            out.push_str(&cur[copied..]);
+            result = Some(out);
         }
     }
     let cur: &str = result.as_deref().unwrap_or(s);
@@ -225,96 +263,94 @@ fn remove_empty_groups(s: &str) -> Option<String> {
 }
 
 /// Shorten floating point numbers in SVG path data: "1.000" → "1", "2.50" → "2.5".
-/// Only operates within `d="..."` attribute values to avoid corrupting URLs
-/// (e.g. `xmlns="http://www.w3.org/2000/svg"`).
+/// Only operates within standalone `d="..."` attribute values to avoid
+/// corrupting URLs (e.g. `xmlns="http://www.w3.org/2000/svg"`) or other
+/// attributes such as `id="v1.0"`. Non-ASCII text is copied untouched.
 fn shorten_path_numbers(s: &str) -> Option<String> {
     if !path_data_has_dot(s) {
         return None;
     }
-    let mut result = String::with_capacity(s.len());
     let bytes = s.as_bytes();
+    let mut result = String::with_capacity(s.len());
+    let mut i = 0;
+    while let Some(rel) = s[i..].find("d=\"") {
+        let at = i + rel;
+        let value_start = at + 3;
+        result.push_str(&s[i..value_start]);
+        i = value_start;
+        if at > 0 && !bytes[at - 1].is_ascii_whitespace() {
+            continue; // e.g. `id="`, not path data
+        }
+        let value_end = s[i..].find('"').map_or(s.len(), |p| i + p);
+        shorten_numbers_in(&s[i..value_end], &mut result);
+        i = value_end;
+    }
+    result.push_str(&s[i..]);
+    Some(result)
+}
+
+/// Copy path data `d` into `out`, trimming trailing fractional zeros.
+fn shorten_numbers_in(d: &str, out: &mut String) {
+    let bytes = d.as_bytes();
     let len = bytes.len();
     let mut i = 0;
-
     while i < len {
-        // Look for d="..." attribute — only shorten numbers inside path data
-        if i + 3 < len
-            && bytes[i] == b'd'
-            && bytes[i + 1] == b'='
-            && bytes[i + 2] == b'"'
-            && (i == 0 || bytes[i - 1].is_ascii_whitespace())
-        {
-            // Copy d=" literally
-            result.push_str("d=\"");
-            i += 3;
-
-            // Find closing quote
-            let attr_start = i;
-            let attr_end = match bytes[attr_start..].iter().position(|&b| b == b'"') {
-                Some(pos) => attr_start + pos,
-                None => len,
-            };
-
-            // Process only the attribute value
-            while i < attr_end {
-                if bytes[i].is_ascii_digit()
-                    || (bytes[i] == b'-' && i + 1 < attr_end && bytes[i + 1].is_ascii_digit())
-                {
-                    let start = i;
-                    if bytes[i] == b'-' {
-                        i += 1;
-                    }
-                    while i < attr_end && bytes[i].is_ascii_digit() {
-                        i += 1;
-                    }
-                    if i < attr_end && bytes[i] == b'.' {
-                        i += 1;
-                        let decimal_start = i;
-                        while i < attr_end && bytes[i].is_ascii_digit() {
-                            i += 1;
-                        }
-                        if i < attr_end && (bytes[i] == b'e' || bytes[i] == b'E') {
-                            i += 1;
-                            if i < attr_end && (bytes[i] == b'+' || bytes[i] == b'-') {
-                                i += 1;
-                            }
-                            while i < attr_end && bytes[i].is_ascii_digit() {
-                                i += 1;
-                            }
-                            result.push_str(&s[start..i]);
-                            continue;
-                        }
-                        let decimal_end = i;
-                        let mut trim_to = decimal_end;
-                        while trim_to > decimal_start && bytes[trim_to - 1] == b'0' {
-                            trim_to -= 1;
-                        }
-                        if trim_to == decimal_start {
-                            result.push_str(&s[start..decimal_start - 1]); // skip the dot
-                        } else {
-                            result.push_str(&s[start..trim_to]);
-                        }
-                    } else {
-                        result.push_str(&s[start..i]);
-                    }
-                } else {
-                    result.push(bytes[i] as char);
-                    i += 1;
-                }
-            }
-
-            // Copy closing quote
-            if i < len && bytes[i] == b'"' {
-                result.push('"');
-                i += 1;
-            }
-        } else {
-            result.push(bytes[i] as char);
+        let starts_number = bytes[i].is_ascii_digit()
+            || (bytes[i] == b'-' && i + 1 < len && bytes[i + 1].is_ascii_digit());
+        if !starts_number {
+            // Copy everything up to the next possible number start verbatim
+            // (keeps multi-byte UTF-8 intact).
+            let next = d[i + 1..]
+                .find(|c: char| c.is_ascii_digit() || c == '-')
+                .map_or(len, |p| i + 1 + p);
+            out.push_str(&d[i..next]);
+            i = next;
+            continue;
+        }
+        let start = i;
+        if bytes[i] == b'-' {
             i += 1;
         }
+        while i < len && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i >= len || bytes[i] != b'.' {
+            out.push_str(&d[start..i]);
+            continue;
+        }
+        i += 1;
+        let decimal_start = i;
+        while i < len && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i < len && (bytes[i] == b'e' || bytes[i] == b'E') {
+            i += 1;
+            if i < len && (bytes[i] == b'+' || bytes[i] == b'-') {
+                i += 1;
+            }
+            while i < len && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            out.push_str(&d[start..i]);
+            continue;
+        }
+        let mut trim_to = i;
+        while trim_to > decimal_start && bytes[trim_to - 1] == b'0' {
+            trim_to -= 1;
+        }
+        if trim_to == decimal_start {
+            // Whole fraction is zero. In compact path data a following "."
+            // starts the next number ("1.0.5" = 1.0 and .5), so dropping the
+            // fraction would merge them into "1.5": keep the number as-is.
+            if i < len && bytes[i] == b'.' {
+                out.push_str(&d[start..i]);
+            } else {
+                out.push_str(&d[start..decimal_start - 1]); // skip the dot
+            }
+        } else {
+            out.push_str(&d[start..trim_to]);
+        }
     }
-
-    Some(result)
 }
 
 /// Whether any `d="..."` attribute value contains a decimal point.
@@ -335,25 +371,44 @@ fn path_data_has_dot(s: &str) -> bool {
     false
 }
 
-/// Remove empty class="" and id="" attributes.
+/// Remove empty `class=""` and `id=""` attributes (standalone attribute
+/// names only, so `data-id=""` is kept), with their leading whitespace.
 fn clean_empty_attributes(s: &str) -> Option<String> {
     if !s.contains("class=\"\"") && !s.contains("id=\"\"") {
         return None;
     }
-    let mut result = s.to_string();
-    for attr in &["class=\"\"", "id=\"\""] {
-        while let Some(idx) = result.find(attr) {
-            // Check if preceded by whitespace
-            let ws_start = result[..idx]
-                .char_indices()
-                .rev()
-                .find(|(_, c)| !c.is_whitespace())
-                .map(|(i, _)| i + 1)
-                .unwrap_or(0);
-            result.replace_range(ws_start..idx + attr.len(), "");
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut copied = 0;
+    let mut i = 0;
+    while i < s.len() {
+        let Some(rel) = s[i..].find("=\"\"") else {
+            break;
+        };
+        let eq = i + rel;
+        i = eq + 3;
+        let name_start = ["class", "id"]
+            .iter()
+            .find(|n| s[..eq].ends_with(*n))
+            .map(|n| eq - n.len());
+        let Some(name_start) = name_start else {
+            continue;
+        };
+        if name_start == 0 || !bytes[name_start - 1].is_ascii_whitespace() {
+            continue; // e.g. `data-id=""`
         }
+        let ws_start = s[..name_start].trim_end().len();
+        if ws_start < copied {
+            continue;
+        }
+        out.push_str(&s[copied..ws_start]);
+        copied = eq + 3;
     }
-    Some(result)
+    if copied == 0 {
+        return None;
+    }
+    out.push_str(&s[copied..]);
+    Some(out)
 }
 
 /// Trim leading/trailing whitespace and collapse multiple newlines.
@@ -518,6 +573,61 @@ mod tests {
         assert_eq!(
             remove_comments("<svg/><!-- open").unwrap(),
             "<svg/><!-- open"
+        );
+    }
+
+    #[test]
+    fn test_deeply_nested_groups_are_linear() {
+        // Regression: one nesting level per pass made this quadratic.
+        let depth = 200_000;
+        let input = format!("<svg>{}{}</svg>", "<g>".repeat(depth), "</g>".repeat(depth));
+        let t = std::time::Instant::now();
+        assert_eq!(remove_empty_groups(&input).unwrap(), "<svg></svg>");
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            t.elapsed()
+        );
+
+        let kept = format!("<svg>{}<path/>{}</svg>", "<g>".repeat(3), "</g>".repeat(3));
+        assert_eq!(remove_empty_groups(&kept), None);
+    }
+
+    #[test]
+    fn test_shorten_numbers_keeps_utf8() {
+        let input = "<svg><text>café ½</text><path d=\"M1.50 2\"/></svg>";
+        assert_eq!(
+            shorten_path_numbers(input).unwrap(),
+            "<svg><text>café ½</text><path d=\"M1.5 2\"/></svg>"
+        );
+    }
+
+    #[test]
+    fn test_shorten_numbers_compact_form() {
+        // "1.0.5" is two numbers (1.0 and .5); must not become "1.5".
+        let input = r#"<path d="M1.0.5L2.50.25 3.0 4.0"/>"#;
+        assert_eq!(
+            shorten_path_numbers(input).unwrap(),
+            r#"<path d="M1.0.5L2.5.25 3 4"/>"#
+        );
+    }
+
+    #[test]
+    fn test_clean_empty_attributes_standalone_only() {
+        let input = r#"<g id="" data-id=""><path class="" d="M0 0"/></g>"#;
+        assert_eq!(
+            clean_empty_attributes(input).unwrap(),
+            r#"<g data-id=""><path d="M0 0"/></g>"#
+        );
+        assert_eq!(clean_empty_attributes(r#"<g data-id="">"#), None);
+    }
+
+    #[test]
+    fn test_metadata_removed_in_one_pass() {
+        let input = "<svg><title>a</title><desc/>\n<metadata>m</metadata><path d=\"M0 0\"/></svg>";
+        assert_eq!(
+            remove_metadata_elements(input).unwrap(),
+            "<svg><path d=\"M0 0\"/></svg>"
         );
     }
 }

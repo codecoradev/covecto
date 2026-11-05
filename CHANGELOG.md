@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `<title>`/`<desc>`/`<metadata>` removal no longer matches tags that merely start with those names (#59)
 - Path-number shortening no longer rewrites numbers inside `id="..."` (or any attribute ending in `d`); only a standalone `d` attribute is path data
 - API: a panic inside a vectorization job now returns `500` instead of dropping the connection, and frees its concurrency slot
+- Optimizer: empty-group and metadata removal are now single linear passes; deeply nested `<g>` input (e.g. via `/v1/optimize`) was quadratic
+- Optimizer: path-number shortening no longer garbles non-ASCII text (bytes were copied as Latin-1 chars) and keeps compact path data like `1.0.5` (= 1.0, .5) from merging into `1.5`
+- Optimizer: `clean_empty_attributes` only removes standalone `id=""`/`class=""`, no longer leaving a broken `data-` behind
 - CLI `--optimize` could not be turned off; added `--optimize=false` and `--no-optimize` (#58)
 - CLI: `vectorize` is now the default subcommand, so the documented `covecto input.png -o out.svg` works (#58)
 
