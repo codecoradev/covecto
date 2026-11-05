@@ -14,8 +14,12 @@ pub struct Limits {
     pub max_queue: usize,
     /// How long a request may wait for a job slot before it gets `503`.
     pub queue_timeout: Duration,
-    /// How long reading a request body may take before `408`. The body is
-    /// read while holding a queue place, so this bounds slow uploads.
+    /// How long reading a request body may take in total before `408`. The
+    /// body is read while holding a queue place, so this bounds how long one
+    /// slow client can hold it. It is a total deadline, not an idle timeout
+    /// (a drip-feeding client would never trip an idle timeout), so it also
+    /// sets the slowest link that can upload a near-limit body: 50 MB in 60 s
+    /// needs about 0.85 MB/s.
     pub upload_timeout: Duration,
     /// Maximum width or height of an uploaded image, checked before decoding.
     pub max_dimension: u32,
@@ -34,7 +38,7 @@ impl Default for Limits {
             max_concurrency,
             max_queue: max_concurrency.saturating_mul(4),
             queue_timeout: Duration::from_secs(30),
-            upload_timeout: Duration::from_secs(30),
+            upload_timeout: Duration::from_secs(60),
             max_dimension: covecto_core::DEFAULT_MAX_DIMENSION,
             spline_max_megapixels: covecto_core::DEFAULT_SPLINE_MAX_MEGAPIXELS,
         }
@@ -43,8 +47,8 @@ impl Default for Limits {
 
 impl Limits {
     /// Defaults overridden by `COVECTO_MAX_CONCURRENCY`, `COVECTO_MAX_QUEUE`,
-    /// `COVECTO_QUEUE_TIMEOUT_SECS`, `COVECTO_MAX_DIMENSION` and
-    /// `COVECTO_SPLINE_MAX_MP`.
+    /// `COVECTO_QUEUE_TIMEOUT_SECS`, `COVECTO_UPLOAD_TIMEOUT_SECS`,
+    /// `COVECTO_MAX_DIMENSION` and `COVECTO_SPLINE_MAX_MP`.
     pub fn from_env() -> Self {
         let mut limits = Self::default();
         if let Some(n) = env_parse::<usize>("COVECTO_MAX_CONCURRENCY").filter(|&n| n > 0) {

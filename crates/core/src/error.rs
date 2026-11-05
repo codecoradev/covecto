@@ -40,6 +40,15 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
+    /// The image exceeds a size or memory limit (ours or the decoder's), as
+    /// opposed to being corrupt.
+    pub fn is_too_large(&self) -> bool {
+        matches!(
+            self,
+            Error::ImageTooLarge { .. } | Error::ImageDecode(image::ImageError::Limits(_))
+        )
+    }
+
     /// The input is not in an image format covecto can decode (unknown or
     /// unsupported format), as opposed to a recognized but corrupt image.
     pub fn is_unsupported_format(&self) -> bool {

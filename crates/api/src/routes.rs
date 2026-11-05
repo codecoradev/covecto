@@ -368,8 +368,10 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            AppError::Core(e @ covecto_core::Error::ImageTooLarge { .. })
-            | AppError::Decode(e @ covecto_core::Error::ImageTooLarge { .. }) => {
+            AppError::Core(e @ covecto_core::Error::ImageTooLarge { .. }) => {
+                (StatusCode::PAYLOAD_TOO_LARGE, e.to_string())
+            }
+            AppError::Decode(e) if e.is_too_large() => {
                 (StatusCode::PAYLOAD_TOO_LARGE, e.to_string())
             }
             AppError::Decode(e) if e.is_unsupported_format() => {
