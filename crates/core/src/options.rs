@@ -157,7 +157,7 @@ pub const OPTIONS: &[OptionSpec] = &[
     OptionSpec {
         name: "spline_max_mp",
         kind: OptionKind::Float,
-        help: "Spline: downscale inputs above this many megapixels (default: 2, 0 = off)",
+        help: "Spline: downscale inputs above this many megapixels (default: 2, 0 = off; a server may enforce its own cap)",
     },
 ];
 

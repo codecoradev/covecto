@@ -607,3 +607,13 @@ async fn test_optimize_endpoint_rejects_bad_optimization_level() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(error.contains("optimization level"), "{error}");
 }
+
+#[tokio::test]
+async fn test_format_field_name_is_normalized() {
+    let resp = app()
+        .oneshot(multipart_with_fields(&[("Format", "pdf")]))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["content-type"], "application/pdf");
+}

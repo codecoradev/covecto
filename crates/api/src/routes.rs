@@ -63,13 +63,20 @@ pub async fn vectorize_handler(
     tokio::time::timeout(state.limits().upload_timeout, async {
         while let Some(field) = multipart.next_field().await.map_err(AppError::Multipart)? {
             let name = field.name().unwrap_or("").to_string();
-            if name == "file" || name.is_empty() {
+            let key = field_key(&name);
+            if key == "file" || key.is_empty() {
+                if image_data.is_some() {
+                    return Err(duplicate_field("file"));
+                }
                 image_data = Some(field.bytes().await.map_err(AppError::Multipart)?);
             } else {
                 let value = field.text().await.map_err(AppError::Multipart)?;
-                if name == "format" {
-                    format = Some(value);
+                if key == "format" {
+                    if format.replace(value).is_some() {
+                        return Err(duplicate_field("format"));
+                    }
                 } else {
+                    // Options (including repeats) are validated by core.
                     options.push((name, value));
                 }
             }
@@ -161,9 +168,15 @@ pub async fn optimize_handler(
     // A slow upload holds a queue place, so bound how long reading it may
     // take (#60): otherwise slow clients could keep every place busy.
     tokio::time::timeout(state.limits().upload_timeout, async {
+        let mut seen = std::collections::HashSet::new();
         while let Some(field) = multipart.next_field().await.map_err(AppError::Multipart)? {
             let name = field.name().unwrap_or("").to_string();
-            if name == "file" || name.is_empty() {
+            let key = field_key(&name);
+            let key = if key.is_empty() { "file".to_string() } else { key };
+            if !seen.insert(key.clone()) {
+                return Err(duplicate_field(&key));
+            }
+            if key == "file" {
                 svg_data = Some(field.bytes().await.map_err(AppError::Multipart)?);
             } else {
                 let value = field.text().await.map_err(AppError::Multipart)?;
@@ -171,7 +184,7 @@ pub async fn optimize_handler(
                 // never a silent fallback. `preset` here is the
                 // Optimization level, not a (vtracer) Preset.
                 let bad = |what: &str| AppError::BadRequest(format!("Invalid {what}: '{value}'"));
-                match name.as_str() {
+                match key.as_str() {
                     "preset" => {
                         preset = value
                             .parse::<OptimizePreset>()
@@ -234,6 +247,19 @@ pub async fn optimize_handler(
         optimized_size,
         reduction_pct,
     }))
+}
+
+/// Field names are matched like Option names in core: case-insensitive,
+/// `-` and `_` interchangeable, leading `--` ignored.
+fn field_key(name: &str) -> String {
+    name.trim()
+        .trim_start_matches("--")
+        .to_ascii_lowercase()
+        .replace('-', "_")
+}
+
+fn duplicate_field(name: &str) -> AppError {
+    AppError::BadRequest(format!("Field '{name}' was sent more than once"))
 }
 
 pub enum AppError {
