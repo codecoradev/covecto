@@ -71,6 +71,7 @@ Vectorize an image.
 | `length_threshold` | float | — | Minimum path length |
 | `max_iterations` | int | — | Max quantization iterations |
 | `path_precision` | int | — | Coordinate decimal places |
+| `spline_max_mp` | float | — | Spline input budget in megapixels; can only lower the server's `COVECTO_SPLINE_MAX_MP` |
 
 **Response** `200` (format=svg)
 
@@ -100,6 +101,15 @@ Returns raw binary with `Content-Type: application/pdf` or `application/postscri
 }
 ```
 
+**Error** `413`: image width or height exceeds `COVECTO_MAX_DIMENSION`
+(checked from the image header, before decoding).
+
+```json
+{
+  "error": "Image too large: 10000x200 exceeds maximum 8192x8192"
+}
+```
+
 ---
 
 ## `POST /v1/optimize`
@@ -113,7 +123,7 @@ Optimize an existing SVG.
 | `file` | binary | ✅ | SVG file to optimize |
 | `preset` | string | — | `default`, `safe`, `none` (default: `default`) |
 | `multipass` | boolean | — | Multiple passes (default: `false`) |
-| `multipass_iterations` | int | — | Pass count (default: `10`) |
+| `multipass_iterations` | int | — | Pass count (default: `10`, capped at `16`) |
 
 **Response** `200`
 
@@ -127,6 +137,20 @@ Optimize an existing SVG.
 ```
 
 ---
+
+## Resource Limits
+
+Vectorization runs on a blocking thread pool, so health checks and uploads stay
+responsive while heavy jobs run. Jobs beyond the concurrency limit wait for a
+free slot (they are queued, not rejected).
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `COVECTO_MAX_CONCURRENCY` | CPU count | Max vectorize/optimize jobs running at once |
+| `COVECTO_MAX_DIMENSION` | `8192` | Max image width or height (px); larger uploads get `413` |
+| `COVECTO_SPLINE_MAX_MP` | `2` | Spline input budget (megapixels); larger images are downscaled before tracing. Clients may only lower it. `0` = no server cap |
+
+The request body limit is 50 MB.
 
 ## OpenAPI Spec
 

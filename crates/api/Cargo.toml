@@ -26,3 +26,4 @@ anyhow = { workspace = true }
 
 [dev-dependencies]
 http-body-util = { workspace = true }
+image = { workspace = true }

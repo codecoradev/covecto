@@ -60,15 +60,20 @@ covecto vectorize [OPTIONS] <INPUT>
 | `--length-threshold <F>` | float | Minimum path length |
 | `--max-iterations <N>` | int | Max color quantization iterations |
 | `--path-precision <N>` | int | Path coordinate decimal places |
+| `--spline-max-mp <MP>` | float | Spline: downscale inputs above this many megapixels before tracing (default `2`, `0` = full size) |
 
 ### Optimization
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--optimize` | Run SVG optimization | `false` |
+| `--optimize[=BOOL]` | Run SVG optimization (`--optimize=false` to disable) | `true` |
+| `--no-optimize` | Disable SVG optimization | — |
 | `--optimize-preset <P>` | `default`, `safe`, `none` | `default` |
 | `--multipass` | Multiple optimization passes | `false` |
-| `--multipass-iterations <N>` | Pass count (1+) | `10` |
+| `--multipass-iterations <N>` | Pass count (1+, capped at 16) | `10` |
+
+The optimizer is skipped for PixelExact output: it is already minimal, so
+streaming to disk stays fully incremental.
 
 ### Batch & UX
 

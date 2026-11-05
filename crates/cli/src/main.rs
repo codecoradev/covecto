@@ -94,9 +94,25 @@ struct VectorizeArgs {
     /// Path coordinate precision (decimal places)
     #[arg(long)]
     path_precision: Option<u32>,
-    /// Run SVG optimization after vectorization
-    #[arg(long, default_value = "true")]
+    /// Spline: downscale inputs above this many megapixels before tracing
+    /// (default 2; 0 = trace at full size). Output keeps the original size.
+    #[arg(long, value_name = "MP")]
+    spline_max_mp: Option<f64>,
+    /// Run SVG optimization after vectorization (default: on).
+    /// Disable with `--optimize=false` or `--no-optimize`.
+    #[arg(
+        long,
+        value_name = "BOOL",
+        default_value_t = true,
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true"
+    )]
     optimize: bool,
+    /// Disable SVG optimization (same as `--optimize=false`)
+    #[arg(long, conflicts_with = "optimize")]
+    no_optimize: bool,
     /// Optimization preset: default, safe, none
     #[arg(long, default_value = "default")]
     optimize_preset: String,
@@ -180,6 +196,7 @@ struct VectorizeOpts {
     length_threshold: Option<f64>,
     max_iterations: Option<usize>,
     path_precision: Option<u32>,
+    spline_max_mp: Option<f64>,
     optimize: bool,
     optimize_preset: String,
     multipass: bool,
@@ -229,6 +246,7 @@ impl VectorizeOpts {
             length_threshold: self.length_threshold,
             max_iterations: self.max_iterations,
             path_precision: self.path_precision,
+            spline_max_megapixels: self.spline_max_mp,
         };
 
         if let Some(ref profile) = self.profile {
@@ -755,7 +773,8 @@ fn from_args(args: VectorizeArgs) -> VectorizeOpts {
         length_threshold: args.length_threshold,
         max_iterations: args.max_iterations,
         path_precision: args.path_precision,
-        optimize: args.optimize,
+        spline_max_mp: args.spline_max_mp,
+        optimize: args.optimize && !args.no_optimize,
         optimize_preset: args.optimize_preset,
         multipass: args.multipass,
         multipass_iterations: args.multipass_iterations,
@@ -767,10 +786,31 @@ fn from_args(args: VectorizeArgs) -> VectorizeOpts {
     }
 }
 
+/// Make `vectorize` the default subcommand, so the documented short form
+/// `covecto input.png -o out.svg` works the same as `covecto vectorize ...`.
+fn with_default_subcommand(mut args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    const PASSTHROUGH: &[&str] = &[
+        "vectorize",
+        "serve",
+        "help",
+        "-h",
+        "--help",
+        "-V",
+        "--version",
+    ];
+    if let Some(first) = args.get(1) {
+        let first = first.to_string_lossy();
+        if !PASSTHROUGH.contains(&first.as_ref()) {
+            args.insert(1, "vectorize".into());
+        }
+    }
+    args
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(with_default_subcommand(std::env::args_os().collect()));
 
     match cli.command {
         Commands::Vectorize(args) => {
@@ -783,4 +823,71 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        let args = args.iter().map(std::ffi::OsString::from).collect();
+        Cli::try_parse_from(with_default_subcommand(args))
+    }
+
+    fn optimize_of(args: &[&str]) -> bool {
+        match parse(args).unwrap().command {
+            Commands::Vectorize(a) => from_args(*a).optimize,
+            Commands::Serve { .. } => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn optimize_flag_defaults_on_and_can_be_disabled() {
+        assert!(optimize_of(&["covecto", "vectorize", "in.png"]));
+        assert!(optimize_of(&[
+            "covecto",
+            "vectorize",
+            "in.png",
+            "--optimize"
+        ]));
+        assert!(optimize_of(&[
+            "covecto",
+            "vectorize",
+            "--optimize",
+            "in.png"
+        ]));
+        assert!(!optimize_of(&[
+            "covecto",
+            "vectorize",
+            "in.png",
+            "--optimize=false"
+        ]));
+        assert!(!optimize_of(&[
+            "covecto",
+            "vectorize",
+            "in.png",
+            "--no-optimize"
+        ]));
+        assert!(
+            parse(&[
+                "covecto",
+                "vectorize",
+                "x.png",
+                "--optimize",
+                "--no-optimize"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn vectorize_is_the_default_subcommand() {
+        let cli = parse(&["covecto", "in.png", "-o", "out.svg"]).unwrap();
+        assert!(matches!(cli.command, Commands::Vectorize(_)));
+        let cli = parse(&["covecto", "--engine", "spline", "in.png"]).unwrap();
+        assert!(matches!(cli.command, Commands::Vectorize(_)));
+        let cli = parse(&["covecto", "serve", "--port", "8080"]).unwrap();
+        assert!(matches!(cli.command, Commands::Serve { port: 8080 }));
+        assert!(parse(&["covecto", "--version"]).is_err()); // clap's DisplayVersion
+    }
 }

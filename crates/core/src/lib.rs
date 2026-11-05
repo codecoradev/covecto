@@ -14,13 +14,16 @@ mod optimize;
 
 pub use config::apply_profile;
 pub use config::{
-    ColorMode, Engine, HierarchicalMode, OptimizeConfig, OptimizePreset, PathSimplifyMode,
-    SplinePreset, VectorizeConfig, VectorizeRequest,
+    ColorMode, DEFAULT_SPLINE_MAX_MEGAPIXELS, Engine, HierarchicalMode, OptimizeConfig,
+    OptimizePreset, PathSimplifyMode, SplinePreset, VectorizeConfig, VectorizeRequest,
 };
 pub use engine::{pixel_exact, spline};
-pub use error::{Error, Result, load_image, load_image_from_bytes};
+pub use error::{
+    DEFAULT_MAX_DIMENSION, Error, Result, load_image, load_image_from_bytes,
+    load_image_from_bytes_with_limit,
+};
 pub use export::{OutputFormat, convert_output};
-pub use optimize::optimize_svg;
+pub use optimize::{MAX_MULTIPASS_ITERATIONS, optimize_svg};
 
 use image::RgbaImage;
 use serde::{Deserialize, Serialize};
@@ -55,47 +58,84 @@ pub struct ResultMetadata {
 /// Select the best engine based on image characteristics.
 fn auto_select_engine(img: &RgbaImage) -> Engine {
     let (w, h) = (img.width(), img.height());
-    let total_pixels = (w * h) as f64;
+    let total_pixels = f64::from(w) * f64::from(h);
 
     if total_pixels == 0.0 {
         return Engine::PixelExact;
     }
 
-    // Count unique colors (sample-based for large images)
-    let unique_colors = count_unique_colors(img);
+    // Count unique colors (sample-based for large images). Once the count
+    // exceeds both thresholds below, the result is Spline regardless.
+    let samples = sample_count(img.as_raw().len() / 4);
+    let threshold = spline_color_threshold(total_pixels, samples);
+    let cap = 129usize.max(threshold as usize + 1);
+    let unique_colors = count_unique_colors(img, cap);
+    choose_engine(w, h, unique_colors, threshold)
+}
 
-    // Heuristic:
-    // - Small images (<= 256x256) with few colors (<= 128) → PixelExact
-    // - Very high unique color density → Spline (likely a photo)
-    // - Otherwise → PixelExact (lossless, fast)
-    let color_density = unique_colors as f64 / total_pixels;
-
+/// Pure engine decision.
+/// - Small images (<= 256x256) with few colors (<= 128) → PixelExact
+/// - More unique colors than `threshold` → Spline (likely a photo)
+/// - Otherwise → PixelExact (lossless, fast)
+fn choose_engine(w: u32, h: u32, unique_colors: usize, threshold: f64) -> Engine {
     if w <= 256 && h <= 256 && unique_colors <= 128 {
         Engine::PixelExact
-    } else if color_density > 0.005 {
+    } else if unique_colors as f64 > threshold {
         Engine::Spline
     } else {
         Engine::PixelExact
     }
 }
 
-/// Count unique RGBA colors in an image.
-/// For large images, samples up to 65_536 pixels to keep this fast.
-fn count_unique_colors(img: &RgbaImage) -> usize {
+/// Target number of pixels sampled by [`count_unique_colors`]. The integer
+/// step means the real count is between this and twice this.
+const COLOR_SAMPLE_LIMIT: usize = 65_536;
+
+/// Number of pixels [`count_unique_colors`] looks at for `total` pixels.
+fn sample_count(total: usize) -> usize {
+    let step = if total > COLOR_SAMPLE_LIMIT {
+        total / COLOR_SAMPLE_LIMIT
+    } else {
+        1
+    };
+    total.div_ceil(step)
+}
+
+/// Unique (sampled) colors needed to pick Spline: 0.5% of the pixel count,
+/// capped at a quarter of the samples.
+///
+/// The count comes from at most ~65k-131k samples, so without the cap the
+/// requirement passes the sample count around 13.1 MP and Spline could
+/// never be chosen (a large photo went to PixelExact and produced a huge
+/// SVG, #60). The cap keeps the requirement continuous in image size: images
+/// below ~3.3 MP are decided exactly as before, and above that a photo needs
+/// more than 25% of the samples to be distinct, which flat screenshots with
+/// antialiased text (hundreds to a few thousand colors) do not reach.
+fn spline_color_threshold(total_pixels: f64, samples: usize) -> f64 {
+    (total_pixels * 0.005).min(samples as f64 * 0.25)
+}
+
+/// Count unique RGBA colors in an image, up to `cap`.
+/// For large images, samples roughly 65_536 to 131_071 pixels (see
+/// [`sample_count`]) to keep this fast.
+/// Stops early once `cap` distinct colors are seen: past that point the
+/// engine decision no longer depends on the exact count.
+fn count_unique_colors(img: &RgbaImage, cap: usize) -> usize {
     use std::collections::HashSet;
     let raw = img.as_raw();
     let total = raw.len() / 4;
-    let step = if total > 65_536 { total / 65_536 } else { 1 };
+    let step = if total > COLOR_SAMPLE_LIMIT {
+        total / COLOR_SAMPLE_LIMIT
+    } else {
+        1
+    };
 
-    let mut colors = HashSet::new();
-    for i in (0..total).step_by(step) {
-        let offset = i * 4;
-        colors.insert([
-            raw[offset],
-            raw[offset + 1],
-            raw[offset + 2],
-            raw[offset + 3],
-        ]);
+    let mut colors: HashSet<u32> = HashSet::with_capacity(cap.min(4096));
+    for px in raw.as_chunks::<4>().0.iter().step_by(step) {
+        colors.insert(u32::from_ne_bytes([px[0], px[1], px[2], px[3]]));
+        if colors.len() >= cap {
+            break;
+        }
     }
     colors.len()
 }
@@ -114,6 +154,27 @@ pub struct StreamResult {
     pub metadata: ResultMetadata,
 }
 
+/// Whether the post-vectorize optimizer should run for this engine.
+///
+/// PixelExact output is already minimal (integer coordinates, no prolog,
+/// comments, metadata or empty groups), so every optimizer pass is a no-op on
+/// it. Skipping it keeps `vectorize_to` truly streaming (#54).
+fn should_optimize(engine: Engine, config: &VectorizeConfig) -> bool {
+    config.optimize && engine != Engine::PixelExact
+}
+
+/// Warn when PixelExact produced pathological output (roughly one path per
+/// few pixels), which typically means a photo was forced through it.
+fn warn_if_pathological(engine: Engine, (w, h): (u32, u32), path_count: usize) {
+    let pixels = w as usize * h as usize;
+    if engine == Engine::PixelExact && pixels >= 65_536 && path_count > pixels / 8 {
+        tracing::warn!(
+            "PixelExact produced {path_count} paths for a {w}x{h} image; \
+             the spline engine is usually far smaller for photo-like input"
+        );
+    }
+}
+
 /// Main vectorization entry point.
 pub fn vectorize(request: &VectorizeRequest) -> Result<VectorizeResult> {
     let engine = match request.config.engine {
@@ -129,7 +190,7 @@ pub fn vectorize(request: &VectorizeRequest) -> Result<VectorizeResult> {
     }?;
 
     // Post-processing: optimization
-    let svg = if request.config.optimize {
+    let svg = if should_optimize(engine, &request.config) {
         optimize_svg(&raw_svg, &request.config.optimize_config)?
     } else {
         raw_svg
@@ -144,13 +205,15 @@ pub fn vectorize(request: &VectorizeRequest) -> Result<VectorizeResult> {
     } else {
         1.0
     };
+    let path_count = count_svg_paths(&svg);
+    warn_if_pathological(engine, (w, h), path_count);
 
     Ok(VectorizeResult {
         engine_used: engine,
         metadata: ResultMetadata {
             input_size: (w, h),
             svg_byte_size,
-            path_count: count_svg_paths(&svg),
+            path_count,
             processing_time_ms: elapsed.as_millis() as u64,
             compression_ratio,
         },
@@ -187,7 +250,7 @@ pub fn vectorize_to<W: std::io::Write>(
     let raw_pixel_bytes = (w as usize * h as usize) * 4;
 
     // Optimization needs the whole SVG, so buffer it and write the result once.
-    let (svg_byte_size, path_count) = if request.config.optimize {
+    let (svg_byte_size, path_count) = if should_optimize(engine, &request.config) {
         let mut buf = Vec::new();
         render(&mut buf, engine, request)?;
         let raw = String::from_utf8(buf).map_err(|e| Error::Optimization(e.to_string()))?;
@@ -198,6 +261,7 @@ pub fn vectorize_to<W: std::io::Write>(
         let m = render(writer, engine, request)?;
         (m.byte_count, m.path_count)
     };
+    warn_if_pathological(engine, (w, h), path_count);
 
     let elapsed = start.elapsed();
     let compression_ratio = if raw_pixel_bytes > 0 {
@@ -395,6 +459,73 @@ mod tests {
                 "{name}: path_count != '<path' in written bytes"
             );
         }
+    }
+
+    #[test]
+    fn test_optimizer_is_noop_on_pixel_exact_output() {
+        // Justifies skipping the optimizer for PixelExact (#54): every preset
+        // must leave its output byte-identical, including translucent groups
+        // (#59), and the output must be well-formed XML.
+        let rgba = image::Rgba;
+        let images = [
+            RgbaImage::from_fn(16, 16, |x, y| {
+                let a = [0, 64, 128, 200, 255][((x + y) / 4) as usize % 5];
+                rgba([(x * 16) as u8, (y * 16) as u8, 90, a])
+            }),
+            RgbaImage::from_fn(20, 12, |x, y| {
+                rgba([(x * 13 % 256) as u8, (y * 21 % 256) as u8, 7, 255])
+            }),
+            RgbaImage::from_pixel(1, 1, rgba([1, 2, 3, 4])),
+        ];
+        for img in images {
+            let svg = pixel_exact::vectorize(&img).unwrap();
+            roxmltree::Document::parse(&svg).expect("pixel-exact SVG is well-formed");
+            for preset in [OptimizePreset::Default, OptimizePreset::Safe] {
+                let config = OptimizeConfig {
+                    preset,
+                    multipass: true,
+                    multipass_iterations: 3,
+                };
+                assert_eq!(optimize_svg(&svg, &config).unwrap(), svg, "{preset:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_auto_select_large_images() {
+        let threshold =
+            |w: usize, h: usize| spline_color_threshold((w * h) as f64, sample_count(w * h));
+        // Above ~13.1 MP the old rule needed more unique colors than samples,
+        // so even an all-unique photo chose PixelExact.
+        let samples = sample_count(4000 * 4000);
+        assert!(samples < 2 * COLOR_SAMPLE_LIMIT, "{samples}");
+        assert_eq!(
+            choose_engine(4000, 4000, samples, threshold(4000, 4000)),
+            Engine::Spline
+        );
+        // A 5K screenshot with antialiased text (a few thousand colors) stays
+        // lossless, like the same content at 4K.
+        assert_eq!(
+            choose_engine(5120, 2880, 3_000, threshold(5120, 2880)),
+            Engine::PixelExact
+        );
+        assert_eq!(
+            choose_engine(3840, 2160, 3_000, threshold(3840, 2160)),
+            Engine::PixelExact
+        );
+        // Small and mid-size images are decided exactly as before (0.5%).
+        assert_eq!(threshold(1000, 1000), 5_000.0);
+        assert_eq!(threshold(512, 512), 512.0 * 512.0 * 0.005);
+        // No cliff around 13.1 MP: the requirement changes smoothly.
+        let (a, b) = (threshold(3600, 3600), threshold(3640, 3640));
+        assert!((a - b).abs() / a < 0.1, "{a} vs {b}");
+    }
+
+    #[test]
+    fn test_count_unique_colors_cap() {
+        let img = RgbaImage::from_fn(64, 64, |x, y| image::Rgba([x as u8, y as u8, 0, 255]));
+        assert_eq!(count_unique_colors(&img, usize::MAX), 4096);
+        assert_eq!(count_unique_colors(&img, 100), 100);
     }
 
     #[test]
