@@ -103,5 +103,8 @@ Would process 3 files:
 The engine shown is exactly the one a real run would use: with `--engine` or a
 `--profile` it is shown as configured, without reading the files; with the
 default `auto` engine each image is decoded (in parallel) and the same
-auto-selection runs as in a real conversion, marked `(auto)`. Unreadable files
-are listed with their error, and the dry run then exits with code 1.
+auto-selection runs as in a real conversion, marked `(auto)`.
+
+With the `auto` engine, unreadable files are listed with their error (on
+stderr) and the dry run exits with code 1. With `--engine` or `--profile` the
+files are not read, so a broken file only shows up in the real run.

@@ -428,7 +428,6 @@ fn compute_output_path(
     out_dir.join(filename)
 }
 
-/// Lightweight engine detection for dry-run (reads image dimensions without full decode).
 /// The Engine a real run would use for `file`, as shown by `--dry-run`.
 ///
 /// Uses core's `select_engine`, the same decision `vectorize` makes, so the
@@ -551,9 +550,8 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
         .clone()
         .or_else(|| opts.output.clone())
         .unwrap_or_else(|| root.join("vectorized"));
-    std::fs::create_dir_all(&out_dir)?;
 
-    // Dry-run: just list files
+    // Dry-run: just list files (writes nothing, not even the output directory)
     if opts.dry_run {
         // Decoding (only needed for an Auto Engine) runs in parallel; the
         // listing keeps input order.
@@ -575,7 +573,7 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
                 ),
                 Err(e) => {
                     unreadable += 1;
-                    println!("  {} → error: {e}", file.display());
+                    eprintln!("  {} → error: {e}", file.display());
                 }
             }
         }
@@ -584,6 +582,8 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
         }
         return Ok(());
     }
+
+    std::fs::create_dir_all(&out_dir)?;
 
     let show_progress = !opts.no_progress && !files.is_empty();
     let (multi, pb) = if show_progress {
@@ -960,9 +960,31 @@ mod tests {
         assert!(preview_engine(Path::new("/does/not/exist.png"), &auto).is_err());
     }
 
+    /// A fresh temp directory, removed on drop (also when a test panics).
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir()
+                .join(format!("covecto-cli-{tag}-{}-{nanos}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn unreadable_files_fail_dry_run_and_batch() {
-        let dir = std::env::temp_dir().join(format!("covecto-cli-test-{}", std::process::id()));
+        let tmp = TempDir::new("unreadable");
+        let dir = tmp.0.clone();
         let input = dir.join("in");
         let out = dir.join("out");
         std::fs::create_dir_all(&input).unwrap();
@@ -973,6 +995,10 @@ mod tests {
         let dry = opts_of(&["covecto", i, "-o", o, "--dry-run", "--no-progress"]);
         let err = cmd_vectorize(&input, &dry).unwrap_err().to_string();
         assert!(err.contains("1 of 2 files could not be read"), "{err}");
+        assert!(
+            !out.exists(),
+            "a dry run writes nothing, not even the output dir"
+        );
 
         let real = opts_of(&["covecto", i, "-o", o, "--no-progress"]);
         let err = cmd_vectorize(&input, &real).unwrap_err().to_string();
@@ -981,8 +1007,6 @@ mod tests {
             out.join("good.svg").exists(),
             "good files are still converted"
         );
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
