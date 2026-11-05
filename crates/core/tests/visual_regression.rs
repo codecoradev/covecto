@@ -1,4 +1,4 @@
-use covecto_core::{Engine, VectorizeConfig, VectorizeRequest, load_image, vectorize};
+use covecto_core::{Engine, ImageLimits, VectorizeConfig, VectorizeRequest, load_image, vectorize};
 use std::path::PathBuf;
 
 /// Visual regression test: vectorize an image, render the SVG back to PNG via resvg,
@@ -53,7 +53,8 @@ fn mae(img1: &image::RgbaImage, img2: &image::RgbaImage) -> f64 {
 /// Visual regression: vectorize → render → compare dimensions.
 fn check_visual_match(fixture: &str, engine: Engine, max_mae: f64) {
     let path = fixture_path(fixture);
-    let img = load_image(&path).unwrap_or_else(|e| panic!("failed to load {fixture}: {e}"));
+    let img = load_image(&path, ImageLimits::default())
+        .unwrap_or_else(|e| panic!("failed to load {fixture}: {e}"));
     let (orig_w, orig_h) = (img.width(), img.height());
 
     let req = VectorizeRequest::new(img)
@@ -80,7 +81,10 @@ fn check_visual_match(fixture: &str, engine: Engine, max_mae: f64) {
         "rendered dimensions mismatch for {fixture}: expected {orig_w}x{orig_h}, got {rend_w}x{rend_h}"
     );
 
-    let error = mae(&load_image(&path).unwrap(), &rendered);
+    let error = mae(
+        &load_image(&path, ImageLimits::default()).unwrap(),
+        &rendered,
+    );
     assert!(
         error <= max_mae,
         "{fixture} MAE {error:.2} exceeds threshold {max_mae:.2} (engine={engine:?})"
@@ -178,7 +182,7 @@ fn visual_pixel_exact_circuit() {
 fn visual_auto_small_icon() {
     // Small icon → auto should pick pixel-exact
     let path = fixture_path("icon-16x16.png");
-    let img = load_image(&path).unwrap();
+    let img = load_image(&path, ImageLimits::default()).unwrap();
     let req = VectorizeRequest::new(img);
     let result = vectorize(&req).unwrap();
     assert!(matches!(result.engine_used, Engine::PixelExact));

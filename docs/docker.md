@@ -23,6 +23,13 @@ services:
       - "3000:3000"
     environment:
       - RUST_LOG=info
+      # Optional resource limits (see API reference)
+      # - COVECTO_MAX_CONCURRENCY=2
+      # - COVECTO_MAX_QUEUE=8
+      # - COVECTO_QUEUE_TIMEOUT_SECS=30
+      # - COVECTO_UPLOAD_TIMEOUT_SECS=60
+      # - COVECTO_MAX_DIMENSION=8192
+      # - COVECTO_SPLINE_MAX_MP=2
     restart: unless-stopped
 ```
 
@@ -52,8 +59,8 @@ curl http://localhost:3000/v1/health
 | Tag | Description |
 |-----|-------------|
 | `latest` | Latest stable release |
-| `v0.1.0` | Pinned version |
-| `v0.1` | Latest patch for 0.1.x |
+| `0.2.0` | Pinned version |
+| `0.2` | Latest 0.2.x patch release |
 
 Images are available on [GHCR](https://github.com/codecoradev/covecto/pkgs/container/covecto) and [Docker Hub](https://hub.docker.com/r/codecoradev/covecto).
 

@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+/// Default input budget for the spline engine, in megapixels (see
+/// [`VectorizeConfig::spline_max_megapixels`]).
+pub const DEFAULT_SPLINE_MAX_MEGAPIXELS: f64 = 2.0;
+
 /// Which vectorization engine to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -97,9 +101,8 @@ pub struct VectorizeConfig {
     pub optimize_config: OptimizeConfig,
 
     // --- Spline engine params (vtracer-backed) ---
-    /// vtracer preset (overrides individual params).
-    pub spline_preset: Option<SplinePreset>,
-
+    // A Preset is not stored here: `options::resolve` expands it into the
+    // fields below, which later layers may change.
     /// Color quantization precision. Higher = more colors preserved. Default: 6.
     pub color_precision: Option<i32>,
 
@@ -132,6 +135,15 @@ pub struct VectorizeConfig {
 
     /// Color mode for vtracer.
     pub color_mode: Option<ColorMode>,
+
+    /// Spline engine input budget in megapixels. vtracer's cost grows faster
+    /// than the pixel count, so larger inputs are downscaled (area average)
+    /// before tracing; the SVG keeps the original `width`/`height` and maps
+    /// the traced size with `viewBox`. `None` uses
+    /// [`DEFAULT_SPLINE_MAX_MEGAPIXELS`]; `Some(0.0)` (or any value <= 0)
+    /// disables the limit. PixelExact is never downscaled.
+    #[serde(default)]
+    pub spline_max_megapixels: Option<f64>,
 }
 
 /// Color mode for the spline engine.
@@ -186,6 +198,21 @@ impl std::str::FromStr for PathSimplifyMode {
     }
 }
 
+impl std::str::FromStr for OptimizePreset {
+    type Err = crate::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "default" => Ok(OptimizePreset::Default),
+            "safe" => Ok(OptimizePreset::Safe),
+            "none" => Ok(OptimizePreset::None),
+            _ => Err(crate::Error::InvalidConfig(format!(
+                "Unknown optimization level: {s}"
+            ))),
+        }
+    }
+}
+
 impl std::str::FromStr for SplinePreset {
     type Err = crate::Error;
 
@@ -211,7 +238,6 @@ impl Default for VectorizeConfig {
                 multipass: false,
                 multipass_iterations: 10,
             },
-            spline_preset: None,
             color_precision: None,
             filter_speckle: None,
             corner_threshold: None,
@@ -223,6 +249,7 @@ impl Default for VectorizeConfig {
             max_iterations: None,
             path_precision: None,
             color_mode: None,
+            spline_max_megapixels: None,
         }
     }
 }
@@ -266,65 +293,5 @@ impl VectorizeRequest {
     pub fn with_config(mut self, config: VectorizeConfig) -> Self {
         self.config = config;
         self
-    }
-}
-
-/// Apply a named profile preset to a vectorization config.
-///
-/// Profiles override individual vtracer parameters. Useful presets:
-/// - `icon` — optimized for small icons (32×32), high detail preservation
-/// - `logo` — optimized for logos, high corner threshold, cutout hierarchical
-/// - `photo` — optimized for photos, lower precision, stacked hierarchical
-/// - `lineart` — optimized for line drawings, binary color mode
-pub fn apply_profile(name: &str, config: &mut VectorizeConfig) {
-    match name.to_lowercase().as_str() {
-        "icon" => {
-            config.engine = Engine::Spline;
-            config.color_precision = Some(4);
-            config.filter_speckle = Some(2);
-            config.corner_threshold = Some(80);
-            config.splice_threshold = Some(30);
-            config.color_mode = Some(ColorMode::Color);
-            config.path_simplify_mode = Some(PathSimplifyMode::Spline);
-            config.layer_difference = Some(10);
-            config.max_iterations = Some(4);
-        }
-        "logo" => {
-            config.engine = Engine::Spline;
-            config.color_precision = Some(8);
-            config.filter_speckle = Some(4);
-            config.corner_threshold = Some(90);
-            config.splice_threshold = Some(45);
-            config.color_mode = Some(ColorMode::Color);
-            config.path_simplify_mode = Some(PathSimplifyMode::Spline);
-            config.hierarchical = Some(HierarchicalMode::Cutout);
-            config.layer_difference = Some(5);
-            config.max_iterations = Some(4);
-        }
-        "photo" => {
-            config.engine = Engine::Spline;
-            config.color_precision = Some(10);
-            config.filter_speckle = Some(4);
-            config.corner_threshold = Some(40);
-            config.splice_threshold = Some(45);
-            config.color_mode = Some(ColorMode::Color);
-            config.path_simplify_mode = Some(PathSimplifyMode::Spline);
-            config.hierarchical = Some(HierarchicalMode::Stacked);
-            config.layer_difference = Some(5);
-            config.max_iterations = Some(2);
-        }
-        "lineart" => {
-            config.engine = Engine::Spline;
-            config.color_precision = Some(2);
-            config.filter_speckle = Some(8);
-            config.corner_threshold = Some(30);
-            config.splice_threshold = Some(60);
-            config.color_mode = Some(ColorMode::Binary);
-            config.path_simplify_mode = Some(PathSimplifyMode::Spline);
-            config.hierarchical = Some(HierarchicalMode::Cutout);
-            config.layer_difference = Some(10);
-            config.max_iterations = Some(2);
-        }
-        _ => {} // Unknown profile silently ignored
     }
 }

@@ -12,6 +12,10 @@ Covecto can optimize SVG output to reduce file size.
 covecto input.png --optimize -o output.svg
 ```
 
+Optimization is **on by default**. Disable it with `--no-optimize` (or
+`--optimize=false`). PixelExact output is already minimal (integer
+coordinates, no metadata), so the optimizer is skipped for that engine.
+
 ## Presets
 
 | Preset | Description | Risk |
@@ -33,7 +37,7 @@ Run multiple optimization passes for better compression:
 covecto input.png --optimize --multipass -o output.svg
 
 # Custom iteration count
-covecto input.png --optimize --multipass --multipass-iterations 20 -o output.svg
+covecto input.png --optimize --multipass --multipass-iterations 16 -o output.svg
 ```
 
 ## Standalone Optimization

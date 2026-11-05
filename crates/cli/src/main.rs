@@ -5,9 +5,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use clap::{Parser, Subcommand};
 use covecto_core::{
-    ColorMode, Engine, HierarchicalMode, OptimizeConfig, OptimizePreset, OutputFormat,
-    PathSimplifyMode, SplinePreset, VectorizeConfig, convert_output, load_image, vectorize,
-    vectorize_to,
+    Engine, ImageLimits, OutputFormat, RenderResult, VectorizeConfig, load_image, options,
+    render_to, select_engine,
 };
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
@@ -53,12 +52,13 @@ struct VectorizeArgs {
     #[arg(short = 'F', long, default_value = "svg")]
     format: String,
     /// Engine: auto, spline, pixel-exact (default: auto)
-    #[arg(short, long, default_value = "auto")]
-    engine: String,
-    /// vtracer preset: bw, poster, photo (overrides individual params)
+    #[arg(short, long)]
+    engine: Option<String>,
+    /// Preset (vtracer starting point for Spline parameters): bw, poster, photo
     #[arg(long)]
     preset: Option<String>,
-    /// Custom preset: icon, logo, photo, lineart (overrides individual params)
+    /// Profile (may also choose the Engine): icon, logo, photo, lineart.
+    /// Explicit flags always win over the Profile and the Preset.
     #[arg(long)]
     profile: Option<String>,
     /// Color quantization precision (1-32, higher = more colors)
@@ -94,18 +94,33 @@ struct VectorizeArgs {
     /// Path coordinate precision (decimal places)
     #[arg(long)]
     path_precision: Option<u32>,
-    /// Run SVG optimization after vectorization
-    #[arg(long, default_value = "true")]
-    optimize: bool,
-    /// Optimization preset: default, safe, none
-    #[arg(long, default_value = "default")]
-    optimize_preset: String,
+    /// Spline: downscale inputs above this many megapixels before tracing
+    /// (default 2; 0 = trace at full size). Output keeps the original size.
+    #[arg(long, value_name = "MP")]
+    spline_max_mp: Option<f64>,
+    /// Run SVG optimization after vectorization (default: on).
+    /// Disable with `--optimize=false` or `--no-optimize`.
+    #[arg(
+        long,
+        value_name = "BOOL",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true"
+    )]
+    optimize: Option<bool>,
+    /// Disable SVG optimization (same as `--optimize=false`)
+    #[arg(long, conflicts_with = "optimize")]
+    no_optimize: bool,
+    /// Optimization level: default, safe, none (default: default)
+    #[arg(long)]
+    optimize_preset: Option<String>,
     /// Run multiple optimization passes
     #[arg(long)]
     multipass: bool,
-    /// Number of multipass iterations (default: 10)
-    #[arg(long, default_value = "10")]
-    multipass_iterations: usize,
+    /// Number of multipass iterations (default: 10, capped at 16)
+    #[arg(long)]
+    multipass_iterations: Option<usize>,
     /// Recursively scan input directories
     #[arg(short = 'R', long)]
     recursive: bool,
@@ -121,43 +136,10 @@ struct VectorizeArgs {
     /// Preview what would be processed without actually vectorizing
     #[arg(long)]
     dry_run: bool,
-}
-
-fn parse_engine(s: &str) -> anyhow::Result<Engine> {
-    s.parse::<Engine>()
-        .map_err(|e| anyhow::anyhow!(e.to_string()))
-}
-
-fn parse_spline_preset(s: &str) -> anyhow::Result<SplinePreset> {
-    s.parse::<SplinePreset>()
-        .map_err(|e| anyhow::anyhow!(e.to_string()))
-}
-
-fn parse_opt_preset(s: &str) -> OptimizePreset {
-    match s.to_lowercase().as_str() {
-        "safe" => OptimizePreset::Safe,
-        "none" => OptimizePreset::None,
-        _ => OptimizePreset::Default,
-    }
-}
-
-fn parse_color_mode(s: &str) -> anyhow::Result<ColorMode> {
-    s.parse::<ColorMode>()
-        .map_err(|e| anyhow::anyhow!(e.to_string()))
-}
-
-fn parse_hierarchical(s: &str) -> anyhow::Result<HierarchicalMode> {
-    s.parse::<HierarchicalMode>()
-        .map_err(|e| anyhow::anyhow!(e.to_string()))
-}
-
-fn parse_path_simplify(s: &str) -> anyhow::Result<PathSimplifyMode> {
-    s.parse::<PathSimplifyMode>()
-        .map_err(|e| anyhow::anyhow!(e.to_string()))
-}
-
-fn apply_profile(name: &str, config: &mut VectorizeConfig) {
-    covecto_core::apply_profile(name, config);
+    /// Refuse images wider or taller than this many pixels, checked before
+    /// decoding (default: 8192; 0 = no limit)
+    #[arg(long, value_name = "PX", default_value_t = covecto_core::DEFAULT_MAX_DIMENSION)]
+    max_dimension: u32,
 }
 
 #[derive(Clone)]
@@ -166,76 +148,47 @@ struct VectorizeOpts {
     output_dir: Option<PathBuf>,
     output_template: Option<String>,
     format: String,
-    engine: String,
-    preset: Option<String>,
-    profile: Option<String>,
-    color_precision: Option<i32>,
-    filter_speckle: Option<usize>,
-    corner_threshold: Option<i32>,
-    splice_threshold: Option<i32>,
-    color_mode: Option<String>,
-    hierarchical: Option<String>,
-    path_simplify: Option<String>,
-    layer_difference: Option<i32>,
-    length_threshold: Option<f64>,
-    max_iterations: Option<usize>,
-    path_precision: Option<u32>,
-    optimize: bool,
-    optimize_preset: String,
-    multipass: bool,
-    multipass_iterations: usize,
+    /// Explicit options only (what the user actually typed), as canonical
+    /// `(name, value)` pairs for `covecto_core::options::resolve`.
+    options: Vec<(&'static str, String)>,
     recursive: bool,
     json: bool,
     json_pretty: bool,
     no_progress: bool,
     dry_run: bool,
+    /// Applied to every image before decoding.
+    limits: ImageLimits,
 }
 
 impl VectorizeOpts {
     fn to_config(&self) -> anyhow::Result<VectorizeConfig> {
-        let mut config = VectorizeConfig {
-            engine: parse_engine(&self.engine)?,
-            optimize: self.optimize,
-            optimize_config: OptimizeConfig {
-                preset: parse_opt_preset(&self.optimize_preset),
-                multipass: self.multipass,
-                multipass_iterations: self.multipass_iterations,
-            },
-            spline_preset: self
-                .preset
-                .as_deref()
-                .map(parse_spline_preset)
-                .transpose()?,
-            color_precision: self.color_precision,
-            filter_speckle: self.filter_speckle,
-            corner_threshold: self.corner_threshold,
-            splice_threshold: self.splice_threshold,
-            color_mode: self
-                .color_mode
-                .as_deref()
-                .map(parse_color_mode)
-                .transpose()?,
-            hierarchical: self
-                .hierarchical
-                .as_deref()
-                .map(parse_hierarchical)
-                .transpose()?,
-            path_simplify_mode: self
-                .path_simplify
-                .as_deref()
-                .map(parse_path_simplify)
-                .transpose()?,
-            layer_difference: self.layer_difference,
-            length_threshold: self.length_threshold,
-            max_iterations: self.max_iterations,
-            path_precision: self.path_precision,
-        };
+        options::resolve(self.options.iter().map(|(k, v)| (*k, v.as_str()))).map_err(cli_error)
+    }
+}
 
-        if let Some(ref profile) = self.profile {
-            apply_profile(profile, &mut config);
+/// Report an options error with the flag spelling the user typed.
+fn cli_error(e: covecto_core::Error) -> anyhow::Error {
+    let flag = |name: &str| format!("--{}", name.replace('_', "-"));
+    match e {
+        covecto_core::Error::InvalidOption {
+            option,
+            value,
+            expected,
+        } => anyhow::anyhow!(
+            "invalid value '{value}' for {}: expected {expected}",
+            flag(option)
+        ),
+        covecto_core::Error::UnknownName { what, name, valid } if what != "option" => {
+            anyhow::anyhow!(
+                "unknown {what} '{name}' for {}. Valid: {}",
+                flag(what),
+                valid.join(", ")
+            )
         }
-
-        Ok(config)
+        covecto_core::Error::DuplicateOption(option) => {
+            anyhow::anyhow!("{} was given more than once", flag(option))
+        }
+        other => anyhow::anyhow!(other),
     }
 }
 
@@ -263,19 +216,13 @@ struct JsonResult {
 }
 
 impl JsonResult {
-    fn from_result(
-        input: &Path,
-        output: &Path,
-        result: &covecto_core::VectorizeResult,
-        format: &OutputFormat,
-        output_bytes: usize,
-    ) -> Self {
+    fn from_result(input: &Path, output: &Path, result: &RenderResult) -> Self {
         Self {
             path: input.display().to_string(),
             output: output.display().to_string(),
             engine: result.engine_used.to_string(),
-            format: format.extension().to_string(),
-            bytes: output_bytes,
+            format: result.format.extension().to_string(),
+            bytes: result.bytes_written,
             paths: result.metadata.path_count,
             time_ms: result.metadata.processing_time_ms,
             input_size: result.metadata.input_size,
@@ -289,27 +236,64 @@ fn apply_output_template(template: &str, stem: &str, ext: &str) -> String {
     template.replace("{stem}", stem).replace("{ext}", ext)
 }
 
-/// Vectorize a single file and optionally write output.
-/// Returns the result and output bytes for JSON reporting.
-/// Uses streaming I/O for SVG output to avoid holding full SVG in memory.
+/// Create a new, unique temporary file next to `target` (same filesystem,
+/// so the final rename is atomic). Uses `create_new`, so it never follows a
+/// symlink or reuses an existing file; the name is short so a long target
+/// name cannot push it past filesystem limits.
+fn create_temp_sibling(target: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = target.parent().unwrap_or(Path::new("."));
+    loop {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!(".covecto-{}-{n}.tmp", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Where the output really goes: an existing symlink at `out_path` is
+/// followed, so its target is replaced and the link stays intact.
+fn resolve_output(out_path: &Path) -> PathBuf {
+    match std::fs::symlink_metadata(out_path) {
+        Ok(m) if m.file_type().is_symlink() => {
+            std::fs::canonicalize(out_path).unwrap_or_else(|_| out_path.to_path_buf())
+        }
+        _ => out_path.to_path_buf(),
+    }
+}
+
+/// Vectorize one file into `output` (or next to the input) in `format`.
+/// Returns the render result and the output path.
+///
+/// The output is written to a temporary file in the same directory and
+/// renamed over `output` only on success, so a failure never leaves a
+/// partial file and never touches a file that already exists there (which
+/// may even be the input image).
 fn vectorize_single_raw(
     input: &Path,
     output: Option<&Path>,
     config: &VectorizeConfig,
     format: &OutputFormat,
-) -> anyhow::Result<(covecto_core::VectorizeResult, usize, PathBuf)> {
-    let img = load_image(input)?;
+    limits: ImageLimits,
+) -> anyhow::Result<(RenderResult, PathBuf)> {
+    let img = load_image(input, limits)?;
     let req = covecto_core::VectorizeRequest::new(img).with_config(config.clone());
 
     let out_path = match output {
         Some(p) => p.to_path_buf(),
         None => {
             let stem = input.file_stem().unwrap().to_string_lossy().to_string();
-            let ext = format.extension();
             input
                 .parent()
                 .unwrap_or(Path::new("."))
-                .join(format!("{stem}.{ext}"))
+                .join(format!("{stem}.{}", format.extension()))
         }
     };
 
@@ -317,26 +301,33 @@ fn vectorize_single_raw(
         std::fs::create_dir_all(parent)?;
     }
 
-    let (bytes, result) = if *format == OutputFormat::Svg {
-        // Streaming path: write SVG directly to file via BufWriter
-        let file = std::fs::File::create(&out_path)?;
-        let mut writer = std::io::BufWriter::new(file);
-        let stream_result = vectorize_to(&mut writer, &req)?;
+    // core picks the strategy per format (SVG streams; PDF/EPS convert in
+    // memory first). Write next to the target, then rename into place.
+    let target = resolve_output(&out_path);
+    let (tmp_path, tmp_file) = create_temp_sibling(&target)?;
+    let mut writer = std::io::BufWriter::new(tmp_file);
+    let rendered = (|| -> anyhow::Result<RenderResult> {
+        let result = render_to(&mut writer, &req, *format)?;
         writer.flush()?;
-        let svg_bytes = stream_result.metadata.svg_byte_size;
-        // Wrap in VectorizeResult for JSON reporting
-        let result = covecto_core::VectorizeResult {
-            svg: String::new(), // not needed for file output
-            engine_used: stream_result.engine_used,
-            metadata: stream_result.metadata,
-        };
-        (svg_bytes, result)
-    } else {
-        // Non-SVG formats need the String for convert_output
-        let result = vectorize(&req)?;
-        let (bytes, _content_type) = convert_output(&result.svg, *format)?;
-        std::fs::write(&out_path, &bytes)?;
-        (bytes.len(), result)
+        Ok(result)
+    })();
+    drop(writer); // close before rename (required on Windows)
+    let result = match rendered.and_then(|r| {
+        // Replacing a file keeps its permissions.
+        if let Ok(meta) = std::fs::metadata(&target)
+            && meta.is_file()
+        {
+            std::fs::set_permissions(&tmp_path, meta.permissions())?;
+        }
+        std::fs::rename(&tmp_path, &target)?;
+        Ok(r)
+    }) {
+        Ok(result) => result,
+        Err(e) => {
+            // Only our own temporary file is removed; `out_path` is untouched.
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e);
+        }
     };
 
     info!(
@@ -344,13 +335,13 @@ fn vectorize_single_raw(
         input.display(),
         out_path.display(),
         result.metadata.processing_time_ms,
-        bytes,
+        result.bytes_written,
         result.metadata.path_count,
         result.engine_used,
         format.extension(),
     );
 
-    Ok((result, bytes, out_path))
+    Ok((result, out_path))
 }
 
 fn make_spinner(msg: &str) -> ProgressBar {
@@ -481,19 +472,24 @@ fn compute_output_path(
     out_dir.join(filename)
 }
 
-/// Lightweight engine detection for dry-run (reads image dimensions without full decode).
-fn detect_engine_preview(path: &Path) -> String {
-    match image::image_dimensions(path) {
-        Ok((w, h)) => {
-            if w <= 256 && h <= 256 {
-                "pixel-exact".to_string()
-            } else {
-                "spline".to_string()
-            }
-        }
-        Err(_) => "auto".to_string(),
+/// The Engine a real run would use for `file`, as shown by `--dry-run`.
+///
+/// Uses core's `select_engine`, the same decision `vectorize` makes, so the
+/// preview cannot drift from a real run. Only an `Auto` Engine needs the
+/// image's pixels; a configured Engine (flag or Profile) is shown without
+/// reading the file.
+fn preview_engine(
+    file: &Path,
+    config: &VectorizeConfig,
+    limits: ImageLimits,
+) -> anyhow::Result<String> {
+    if config.engine != Engine::Auto {
+        return Ok(config.engine.to_string());
     }
+    let img = load_image(file, limits)?;
+    Ok(format!("{} (auto)", select_engine(config, &img)))
 }
+
 fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
     let config = opts.to_config()?;
     let format = parse_output_format(&opts.format)?;
@@ -516,7 +512,8 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
                 let stem = file.file_stem().unwrap().to_string_lossy().to_string();
                 PathBuf::from(apply_output_template(template, &stem, ext))
             });
-            let engine = detect_engine_preview(file);
+            let engine = preview_engine(file, &config, opts.limits)
+                .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", file.display()))?;
             println!(
                 "Would process: {} → {} (engine: {}, format: {})",
                 file.display(),
@@ -544,12 +541,12 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
                 None
             };
 
-            match vectorize_single_raw(file, Some(&out_path), &config, &format) {
-                Ok((result, bytes, out)) => {
+            match vectorize_single_raw(file, Some(&out_path), &config, &format, opts.limits) {
+                Ok((result, out)) => {
                     if let Some(s) = spinner {
                         s.finish_and_clear();
                     }
-                    let json_result = JsonResult::from_result(file, &out, &result, &format, bytes);
+                    let json_result = JsonResult::from_result(file, &out, &result);
                     let json_output = if opts.json_pretty {
                         serde_json::to_string_pretty(&json_result)?
                     } else {
@@ -576,18 +573,18 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
                 None
             };
 
-            let res = vectorize_single_raw(file, Some(&out_path), &config, &format);
+            let res = vectorize_single_raw(file, Some(&out_path), &config, &format, opts.limits);
             if let Some(s) = spinner {
                 s.finish_and_clear();
             }
             res?;
         } else {
             // No --output and no --json: write to stdout (backward compat)
-            let img = load_image(file)?;
+            let img = load_image(file, opts.limits)?;
             let req = covecto_core::VectorizeRequest::new(img).with_config(config.clone());
-            let result = vectorize(&req)?;
-            let (bytes, _ct) = convert_output(&result.svg, format)?;
-            std::io::Write::write_all(&mut std::io::stdout(), &bytes)?;
+            let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
+            render_to(&mut stdout, &req, format)?;
+            stdout.flush()?;
         }
 
         return Ok(());
@@ -601,24 +598,40 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
         .clone()
         .or_else(|| opts.output.clone())
         .unwrap_or_else(|| root.join("vectorized"));
-    std::fs::create_dir_all(&out_dir)?;
 
-    // Dry-run: just list files
+    // Dry-run: just list files (writes nothing, not even the output directory)
     if opts.dry_run {
+        // Decoding (only needed for an Auto Engine) runs in parallel; the
+        // listing keeps input order.
+        let previews: Vec<anyhow::Result<String>> = files
+            .par_iter()
+            .map(|file| preview_engine(file, &config, opts.limits))
+            .collect();
         println!("Would process {} files:", files.len());
-        for file in &files {
+        let mut unreadable = 0usize;
+        for (file, preview) in files.iter().zip(previews) {
             let out_path =
                 compute_output_path(file, root, &out_dir, template, ext, preserve_structure);
-            let engine = detect_engine_preview(file);
-            println!(
-                "  {} → {} (engine: {})",
-                file.display(),
-                out_path.display(),
-                engine
-            );
+            match preview {
+                Ok(engine) => println!(
+                    "  {} → {} (engine: {})",
+                    file.display(),
+                    out_path.display(),
+                    engine
+                ),
+                Err(e) => {
+                    unreadable += 1;
+                    eprintln!("  {} → error: {e}", file.display());
+                }
+            }
+        }
+        if unreadable > 0 {
+            anyhow::bail!("{unreadable} of {} files could not be read", files.len());
         }
         return Ok(());
     }
+
+    std::fs::create_dir_all(&out_dir)?;
 
     let show_progress = !opts.no_progress && !files.is_empty();
     let (multi, pb) = if show_progress {
@@ -672,18 +685,15 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
         .zip(out_paths.par_iter())
         .enumerate()
         .filter_map(|(idx, (file, out_path))| {
-            let res = vectorize_single_raw(file, Some(out_path), &config, &format);
+            let res = vectorize_single_raw(file, Some(out_path), &config, &format, opts.limits);
             if let Some(ref p) = pb {
                 p.inc(1);
             }
             match res {
-                Ok((result, bytes, out)) => {
+                Ok((result, out)) => {
                     count.fetch_add(1, Ordering::Relaxed);
                     if opts.json {
-                        Some((
-                            idx,
-                            JsonResult::from_result(file, &out, &result, &format, bytes),
-                        ))
+                        Some((idx, JsonResult::from_result(file, &out, &result)))
                     } else {
                         None
                     }
@@ -732,45 +742,107 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
         println!("{json_output}");
     }
 
+    // Failures are reported above, per file; the exit code must say so too.
+    if error_count > 0 {
+        anyhow::bail!("{error_count} of {} files failed", files.len());
+    }
     Ok(())
 }
 
 fn from_args(args: VectorizeArgs) -> VectorizeOpts {
+    // Only flags the user typed become Explicit options; defaults belong to
+    // covecto-core, so a Profile can still choose the Engine.
+    let mut options: Vec<(&'static str, String)> = Vec::new();
+    let mut push = |name: &'static str, value: Option<String>| {
+        if let Some(v) = value {
+            options.push((name, v));
+        }
+    };
+    let s = |v: Option<i32>| v.map(|v| v.to_string());
+    let u = |v: Option<usize>| v.map(|v| v.to_string());
+    push("engine", args.engine);
+    push("preset", args.preset);
+    push("profile", args.profile);
+    push("color_precision", s(args.color_precision));
+    push("filter_speckle", u(args.filter_speckle));
+    push("corner_threshold", s(args.corner_threshold));
+    push("splice_threshold", s(args.splice_threshold));
+    push("color_mode", args.color_mode);
+    push("hierarchical", args.hierarchical);
+    push("path_simplify", args.path_simplify);
+    push("layer_difference", s(args.layer_difference));
+    push(
+        "length_threshold",
+        args.length_threshold.map(|v| v.to_string()),
+    );
+    push("max_iterations", u(args.max_iterations));
+    push("path_precision", args.path_precision.map(|v| v.to_string()));
+    push("spline_max_mp", args.spline_max_mp.map(|v| v.to_string()));
+    push(
+        "optimize",
+        if args.no_optimize {
+            Some("false".into())
+        } else {
+            args.optimize.map(|v| v.to_string())
+        },
+    );
+    push("optimize_preset", args.optimize_preset);
+    push("multipass", args.multipass.then(|| "true".into()));
+    push("multipass_iterations", u(args.multipass_iterations));
+
     VectorizeOpts {
         output: args.output,
         output_dir: args.output_dir,
         output_template: args.output_template,
         format: args.format,
-        engine: args.engine,
-        preset: args.preset,
-        profile: args.profile,
-        color_precision: args.color_precision,
-        filter_speckle: args.filter_speckle,
-        corner_threshold: args.corner_threshold,
-        splice_threshold: args.splice_threshold,
-        color_mode: args.color_mode,
-        hierarchical: args.hierarchical,
-        path_simplify: args.path_simplify,
-        layer_difference: args.layer_difference,
-        length_threshold: args.length_threshold,
-        max_iterations: args.max_iterations,
-        path_precision: args.path_precision,
-        optimize: args.optimize,
-        optimize_preset: args.optimize_preset,
-        multipass: args.multipass,
-        multipass_iterations: args.multipass_iterations,
+        options,
         recursive: args.recursive,
         json: args.json || args.json_pretty,
         json_pretty: args.json_pretty,
         no_progress: args.no_progress,
         dry_run: args.dry_run,
+        limits: ImageLimits {
+            max_dimension: args.max_dimension,
+        },
     }
+}
+
+/// Make `vectorize` the default subcommand, so the documented short form
+/// `covecto input.png -o out.svg` works the same as `covecto vectorize ...`.
+fn with_default_subcommand(mut args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    const PASSTHROUGH: &[&str] = &[
+        "vectorize",
+        "serve",
+        "help",
+        "-h",
+        "--help",
+        "-V",
+        "--version",
+    ];
+    if let Some(first) = args.get(1) {
+        let first_str = first.to_string_lossy();
+        if !PASSTHROUGH.contains(&first_str.as_ref()) && looks_like_input(first) {
+            args.insert(1, "vectorize".into());
+        }
+    }
+    args
+}
+
+/// Whether the first argument is an input (or a vectorize flag) rather than a
+/// mistyped subcommand. A bare word like `serv` that is not an existing path
+/// is left to clap, which reports "unrecognized subcommand" and suggests
+/// `serve`, instead of failing later with "file not found".
+fn looks_like_input(arg: &std::ffi::OsStr) -> bool {
+    let s = arg.to_string_lossy();
+    s.starts_with('-')
+        || std::path::Path::new(arg).exists()
+        || s.contains(['.', '/', '\\', '*', '?', '['])
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(with_default_subcommand(std::env::args_os().collect()));
 
     match cli.command {
         Commands::Vectorize(args) => {
@@ -783,4 +855,384 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        let args = args.iter().map(std::ffi::OsString::from).collect();
+        Cli::try_parse_from(with_default_subcommand(args))
+    }
+
+    fn optimize_of(args: &[&str]) -> bool {
+        match parse(args).unwrap().command {
+            Commands::Vectorize(a) => from_args(*a).to_config().unwrap().optimize,
+            Commands::Serve { .. } => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn optimize_flag_defaults_on_and_can_be_disabled() {
+        assert!(optimize_of(&["covecto", "vectorize", "in.png"]));
+        assert!(optimize_of(&[
+            "covecto",
+            "vectorize",
+            "in.png",
+            "--optimize"
+        ]));
+        assert!(optimize_of(&[
+            "covecto",
+            "vectorize",
+            "--optimize",
+            "in.png"
+        ]));
+        assert!(!optimize_of(&[
+            "covecto",
+            "vectorize",
+            "in.png",
+            "--optimize=false"
+        ]));
+        assert!(!optimize_of(&[
+            "covecto",
+            "vectorize",
+            "in.png",
+            "--no-optimize"
+        ]));
+        assert!(
+            parse(&[
+                "covecto",
+                "vectorize",
+                "x.png",
+                "--optimize",
+                "--no-optimize"
+            ])
+            .is_err()
+        );
+    }
+
+    fn config_of(args: &[&str]) -> anyhow::Result<VectorizeConfig> {
+        match parse(args).unwrap().command {
+            Commands::Vectorize(a) => from_args(*a).to_config(),
+            Commands::Serve { .. } => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn only_typed_flags_are_explicit_options() {
+        // No flag typed: nothing is explicit, core defaults apply.
+        let c = config_of(&["covecto", "in.png"]).unwrap();
+        assert_eq!(c.engine, covecto_core::Engine::Auto);
+        // An untyped --engine must not count as explicit "auto", so the
+        // Profile can choose the Engine; a typed flag beats the Profile.
+        let c = config_of(&[
+            "covecto",
+            "in.png",
+            "--profile",
+            "icon",
+            "--corner-threshold",
+            "120",
+        ])
+        .unwrap();
+        assert_eq!(c.engine, covecto_core::Engine::Spline);
+        assert_eq!(c.corner_threshold, Some(120));
+        let c = config_of(&[
+            "covecto",
+            "in.png",
+            "--engine",
+            "pixel-exact",
+            "--profile",
+            "icon",
+        ])
+        .unwrap();
+        assert_eq!(c.engine, covecto_core::Engine::PixelExact);
+    }
+
+    #[test]
+    fn option_errors_use_flag_spelling() {
+        let e = config_of(&["covecto", "in.png", "--color-mode", "purple"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("--color-mode") && e.contains("color, binary"),
+            "{e}"
+        );
+        let e = config_of(&["covecto", "in.png", "--profile", "icn"])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("--profile") && e.contains("icon, logo"), "{e}");
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures")
+            .join(name)
+    }
+
+    fn opts_of(args: &[&str]) -> VectorizeOpts {
+        match parse(args).unwrap().command {
+            Commands::Vectorize(a) => from_args(*a),
+            Commands::Serve { .. } => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn preview_matches_core_selection() {
+        // A configured Engine is shown without reading the file at all.
+        let spline = config_of(&["covecto", "x.png", "--engine", "spline"]).unwrap();
+        assert_eq!(
+            preview_engine(
+                Path::new("/does/not/exist.png"),
+                &spline,
+                ImageLimits::default()
+            )
+            .unwrap(),
+            "spline"
+        );
+        let profile = config_of(&["covecto", "x.png", "--profile", "icon"]).unwrap();
+        assert_eq!(
+            preview_engine(
+                Path::new("/does/not/exist.png"),
+                &profile,
+                ImageLimits::default()
+            )
+            .unwrap(),
+            "spline"
+        );
+        // Auto: the preview is exactly core's decision for this image.
+        let auto = config_of(&["covecto", "x.png"]).unwrap();
+        for name in [
+            "icon-16x16.png",
+            "photo-gradient-64.png",
+            "shapes-512x512.png",
+        ] {
+            let file = fixture(name);
+            let expected =
+                select_engine(&auto, &load_image(&file, ImageLimits::default()).unwrap());
+            assert_eq!(
+                preview_engine(&file, &auto, ImageLimits::default()).unwrap(),
+                format!("{expected} (auto)"),
+                "{name}"
+            );
+        }
+        assert!(
+            preview_engine(
+                Path::new("/does/not/exist.png"),
+                &auto,
+                ImageLimits::default()
+            )
+            .is_err()
+        );
+    }
+
+    /// A fresh temp directory, removed on drop (also when a test panics).
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir()
+                .join(format!("covecto-cli-{tag}-{}-{nanos}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn unreadable_files_fail_dry_run_and_batch() {
+        let tmp = TempDir::new("unreadable");
+        let dir = tmp.0.clone();
+        let input = dir.join("in");
+        let out = dir.join("out");
+        std::fs::create_dir_all(&input).unwrap();
+        std::fs::copy(fixture("icon-16x16.png"), input.join("good.png")).unwrap();
+        std::fs::write(input.join("broken.png"), b"not a png").unwrap();
+        let (i, o) = (input.to_str().unwrap(), out.to_str().unwrap());
+
+        let dry = opts_of(&["covecto", i, "-o", o, "--dry-run", "--no-progress"]);
+        let err = cmd_vectorize(&input, &dry).unwrap_err().to_string();
+        assert!(err.contains("1 of 2 files could not be read"), "{err}");
+        assert!(
+            !out.exists(),
+            "a dry run writes nothing, not even the output dir"
+        );
+
+        let real = opts_of(&["covecto", i, "-o", o, "--no-progress"]);
+        let err = cmd_vectorize(&input, &real).unwrap_err().to_string();
+        assert!(err.contains("1 of 2 files failed"), "{err}");
+        assert!(
+            out.join("good.svg").exists(),
+            "good files are still converted"
+        );
+    }
+
+    #[test]
+    fn max_dimension_limits_cli_loads() {
+        // The CLI applies the same pre-decode limit as the API (default 8192).
+        assert_eq!(
+            opts_of(&["covecto", "x.png"]).limits,
+            ImageLimits::default()
+        );
+        let tmp = TempDir::new("maxdim");
+        let input = fixture("icon-32x32.png");
+        let out = tmp.0.join("o.svg");
+        let (i, o) = (input.to_str().unwrap(), out.to_str().unwrap());
+
+        let small = opts_of(&["covecto", i, "-o", o, "--max-dimension", "16"]);
+        let err = cmd_vectorize(&input, &small).unwrap_err().to_string();
+        assert!(err.contains("too large") && err.contains("32x32"), "{err}");
+        assert!(!out.exists());
+
+        let unlimited = opts_of(&["covecto", i, "-o", o, "--max-dimension", "0"]);
+        cmd_vectorize(&input, &unlimited).unwrap();
+        assert!(out.exists());
+    }
+
+    #[test]
+    fn every_format_goes_through_core_render() {
+        let tmp = TempDir::new("formats");
+        let input = fixture("icon-32x32.png");
+        let config = config_of(&["covecto", "x.png"]).unwrap();
+        for (format, magic) in [
+            (OutputFormat::Svg, b"<svg".as_slice()),
+            (OutputFormat::Pdf, b"%PDF".as_slice()),
+            (OutputFormat::Eps, b"%!PS".as_slice()),
+        ] {
+            let out = tmp.0.join(format!("o.{}", format.extension()));
+            let (result, path) =
+                vectorize_single_raw(&input, Some(&out), &config, &format, ImageLimits::default())
+                    .unwrap();
+            let written = std::fs::read(&path).unwrap();
+            assert!(written.starts_with(magic), "{format:?}");
+            assert_eq!(result.bytes_written, written.len(), "{format:?}");
+            assert_eq!(result.format, format);
+        }
+    }
+
+    fn leftovers(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".covecto-") && n.ends_with(".tmp"))
+            .collect()
+    }
+
+    #[test]
+    fn existing_output_survives_a_failed_write() {
+        // The render succeeds but moving it into place fails (the target is
+        // a directory): the target must be untouched and no temp file left.
+        let tmp = TempDir::new("survive");
+        let input = fixture("icon-32x32.png");
+        let config = config_of(&["covecto", "x.png"]).unwrap();
+        let target = tmp.0.join("taken.pdf");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("keep.txt"), b"keep").unwrap();
+        let res = vectorize_single_raw(
+            &input,
+            Some(&target),
+            &config,
+            &OutputFormat::Pdf,
+            ImageLimits::default(),
+        );
+        assert!(res.is_err());
+        assert_eq!(std::fs::read(target.join("keep.txt")).unwrap(), b"keep");
+        assert!(leftovers(&tmp.0).is_empty(), "{:?}", leftovers(&tmp.0));
+
+        // An unreadable input never touches an existing output file.
+        let existing = tmp.0.join("o.svg");
+        std::fs::write(&existing, b"previous").unwrap();
+        let broken = tmp.0.join("broken.png");
+        std::fs::write(&broken, b"not a png").unwrap();
+        let res = vectorize_single_raw(
+            &broken,
+            Some(&existing),
+            &config,
+            &OutputFormat::Svg,
+            ImageLimits::default(),
+        );
+        assert!(res.is_err());
+        assert_eq!(std::fs::read(&existing).unwrap(), b"previous");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_keeps_permissions_and_follows_symlinks() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new("perms");
+        let input = fixture("icon-32x32.png");
+        let config = config_of(&["covecto", "x.png"]).unwrap();
+        let real = tmp.0.join("real.svg");
+        std::fs::write(&real, b"previous").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let link = tmp.0.join("link.svg");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        vectorize_single_raw(
+            &input,
+            Some(&link),
+            &config,
+            &OutputFormat::Svg,
+            ImageLimits::default(),
+        )
+        .unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(std::fs::read(&real).unwrap().starts_with(b"<svg"));
+        let mode = std::fs::metadata(&real).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
+        assert!(leftovers(&tmp.0).is_empty());
+    }
+
+    #[test]
+    fn successful_write_replaces_existing_output() {
+        let tmp = TempDir::new("replace");
+        let input = fixture("icon-32x32.png");
+        let config = config_of(&["covecto", "x.png"]).unwrap();
+        let out = tmp.0.join("o.svg");
+        std::fs::write(&out, b"previous").unwrap();
+        vectorize_single_raw(
+            &input,
+            Some(&out),
+            &config,
+            &OutputFormat::Svg,
+            ImageLimits::default(),
+        )
+        .unwrap();
+        assert!(std::fs::read(&out).unwrap().starts_with(b"<svg"));
+        assert!(leftovers(&tmp.0).is_empty());
+    }
+
+    #[test]
+    fn vectorize_is_the_default_subcommand() {
+        let cli = parse(&["covecto", "in.png", "-o", "out.svg"]).unwrap();
+        assert!(matches!(cli.command, Commands::Vectorize(_)));
+        let cli = parse(&["covecto", "--engine", "spline", "in.png"]).unwrap();
+        assert!(matches!(cli.command, Commands::Vectorize(_)));
+        let cli = parse(&["covecto", "serve", "--port", "8080"]).unwrap();
+        assert!(matches!(cli.command, Commands::Serve { port: 8080 }));
+        // Paths and globs without an extension still route to vectorize.
+        let cli = parse(&["covecto", "icons/", "-o", "out/"]).unwrap();
+        assert!(matches!(cli.command, Commands::Vectorize(_)));
+        let cli = parse(&["covecto", "*.png"]).unwrap();
+        assert!(matches!(cli.command, Commands::Vectorize(_)));
+        // #60: a mistyped subcommand is clap's error (with a suggestion),
+        // not a vectorize run on a file named "serv".
+        let err = parse(&["covecto", "serv"]).err().expect("must not parse");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+        assert!(err.to_string().contains("serve"), "{err}");
+        assert!(parse(&["covecto", "--version"]).is_err()); // clap's DisplayVersion
+    }
 }

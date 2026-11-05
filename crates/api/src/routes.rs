@@ -1,16 +1,17 @@
+use axum::body::Bytes;
 use axum::{
     extract::{Multipart, State},
     http::StatusCode,
     response::{IntoResponse, Json, Response},
 };
 use covecto_core::{
-    Engine, OptimizeConfig, OptimizePreset, OutputFormat, VectorizeConfig, VectorizeRequest,
-    convert_output, load_image_from_bytes, optimize_svg, vectorize as core_vectorize,
+    ImageLimits, OptimizeConfig, OptimizePreset, OutputFormat, VectorizeRequest, load_image,
+    optimize_svg, render_to,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tracing::info;
 
-use super::state::AppState;
+use super::state::{AppState, JobError};
 
 #[derive(Serialize)]
 pub struct HealthResponse {
@@ -38,29 +39,6 @@ pub async fn metrics(State(state): State<AppState>) -> Json<MetricsResponse> {
     })
 }
 
-#[derive(Deserialize)]
-struct VectorizeParams {
-    format: Option<String>,
-    engine: Option<String>,
-    profile: Option<String>,
-    optimize: Option<bool>,
-    optimize_preset: Option<String>,
-    multipass: Option<bool>,
-    multipass_iterations: Option<usize>,
-    preset: Option<String>,
-    color_precision: Option<i32>,
-    filter_speckle: Option<usize>,
-    corner_threshold: Option<i32>,
-    splice_threshold: Option<i32>,
-    hierarchical: Option<String>,
-    path_simplify: Option<String>,
-    layer_difference: Option<i32>,
-    length_threshold: Option<f64>,
-    max_iterations: Option<usize>,
-    path_precision: Option<u32>,
-    color_mode: Option<String>,
-}
-
 #[derive(Serialize)]
 pub struct VectorizeResponse {
     svg: String,
@@ -72,130 +50,76 @@ pub async fn vectorize_handler(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> Result<Response, AppError> {
-    let mut params = VectorizeParams {
-        format: None,
-        engine: None,
-        profile: None,
-        optimize: None,
-        optimize_preset: None,
-        multipass: None,
-        multipass_iterations: None,
-        preset: None,
-        color_precision: None,
-        filter_speckle: None,
-        corner_threshold: None,
-        splice_threshold: None,
-        hierarchical: None,
-        path_simplify: None,
-        layer_difference: None,
-        length_threshold: None,
-        max_iterations: None,
-        path_precision: None,
-        color_mode: None,
-    };
-    let mut image_data: Option<Vec<u8>> = None;
+    // Take a queue place before reading the upload (#60): when the server
+    // is saturated the body is never buffered.
+    let ticket = state.admit().map_err(AppError::from)?;
+    // Explicit options as sent; covecto-core resolves and validates them.
+    let mut options: Vec<(String, String)> = Vec::new();
+    let mut format: Option<String> = None;
+    let mut image_data: Option<Bytes> = None;
 
-    while let Some(field) = multipart.next_field().await.map_err(AppError::Multipart)? {
-        let name = field.name().unwrap_or("").to_string();
-        if name == "file" || name.is_empty() {
-            let bytes = field.bytes().await.map_err(AppError::Multipart)?;
-            image_data = Some(bytes.to_vec());
-        } else {
-            let value = field.text().await.map_err(AppError::Multipart)?;
-            match name.as_str() {
-                "format" => params.format = Some(value),
-                "engine" => params.engine = Some(value),
-                "optimize" => params.optimize = value.parse().ok(),
-                "optimize_preset" => params.optimize_preset = Some(value),
-                "multipass" => params.multipass = value.parse().ok(),
-                "multipass_iterations" => params.multipass_iterations = value.parse().ok(),
-                "preset" => params.preset = Some(value),
-                "profile" => params.profile = Some(value),
-                "color_precision" => params.color_precision = value.parse().ok(),
-                "filter_speckle" => params.filter_speckle = value.parse().ok(),
-                "corner_threshold" => params.corner_threshold = value.parse().ok(),
-                "splice_threshold" => params.splice_threshold = value.parse().ok(),
-                "hierarchical" => params.hierarchical = Some(value),
-                "path_simplify" => params.path_simplify = Some(value),
-                "layer_difference" => params.layer_difference = value.parse().ok(),
-                "length_threshold" => params.length_threshold = value.parse().ok(),
-                "max_iterations" => params.max_iterations = value.parse().ok(),
-                "path_precision" => params.path_precision = value.parse().ok(),
-                "color_mode" => params.color_mode = Some(value),
-                _ => {}
+    // A slow upload holds a queue place, so bound how long reading it may
+    // take (#60): otherwise slow clients could keep every place busy.
+    tokio::time::timeout(state.limits().upload_timeout, async {
+        while let Some(field) = multipart.next_field().await.map_err(AppError::Multipart)? {
+            let name = field.name().unwrap_or("").to_string();
+            let key = field_key(&name);
+            if key == "file" || key.is_empty() {
+                if image_data.is_some() {
+                    return Err(duplicate_field("file"));
+                }
+                image_data = Some(field.bytes().await.map_err(AppError::Multipart)?);
+            } else {
+                let value = field.text().await.map_err(AppError::Multipart)?;
+                if key == "format" {
+                    if format.replace(value).is_some() {
+                        return Err(duplicate_field("format"));
+                    }
+                } else {
+                    // Options (including repeats) are validated by core.
+                    options.push((name, value));
+                }
             }
         }
-    }
+        Ok::<(), AppError>(())
+    })
+    .await
+    .map_err(|_| AppError::UploadTimeout)??;
 
     let data = image_data.ok_or(AppError::BadRequest("No file provided".into()))?;
-    let img = load_image_from_bytes(&data, None).map_err(AppError::Core)?;
 
-    let engine = params
-        .engine
+    // One set of rules for every frontend: precedence (defaults < Preset <
+    // Profile < Explicit options) and strict validation -> 400.
+    let mut config =
+        covecto_core::options::resolve(options.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    // Server policy, not a domain rule: a client may only lower the budget.
+    config.spline_max_megapixels = Some(state.limits().spline_budget(config.spline_max_megapixels));
+
+    // Validate the output format before doing any heavy work.
+    let output_format: OutputFormat = format
         .as_deref()
-        .unwrap_or("auto")
-        .parse::<Engine>()
-        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+        .unwrap_or("svg")
+        .parse::<OutputFormat>()
+        .map_err(|e: covecto_core::Error| AppError::BadRequest(e.to_string()))?;
 
-    let opt_preset = match params.optimize_preset.as_deref().unwrap_or("default") {
-        "safe" => OptimizePreset::Safe,
-        "none" => OptimizePreset::None,
-        _ => OptimizePreset::Default,
-    };
-
-    let mut config = VectorizeConfig {
-        engine,
-        optimize: params.optimize.unwrap_or(true),
-        optimize_config: OptimizeConfig {
-            preset: opt_preset,
-            multipass: params.multipass.unwrap_or(false),
-            multipass_iterations: params.multipass_iterations.unwrap_or(10),
-        },
-        spline_preset: params
-            .preset
-            .as_deref()
-            .map(|s| s.parse())
-            .transpose()
-            .ok()
-            .flatten(),
-        color_precision: params.color_precision,
-        filter_speckle: params.filter_speckle,
-        corner_threshold: params.corner_threshold,
-        splice_threshold: params.splice_threshold,
-        color_mode: params
-            .color_mode
-            .as_deref()
-            .map(|s| s.parse())
-            .transpose()
-            .ok()
-            .flatten(),
-        hierarchical: params
-            .hierarchical
-            .as_deref()
-            .map(|s| s.parse())
-            .transpose()
-            .ok()
-            .flatten(),
-        path_simplify_mode: params
-            .path_simplify
-            .as_deref()
-            .map(|s| s.parse())
-            .transpose()
-            .ok()
-            .flatten(),
-        layer_difference: params.layer_difference,
-        length_threshold: params.length_threshold,
-        max_iterations: params.max_iterations,
-        path_precision: params.path_precision,
-    };
-
-    // Apply profile preset (overrides individual params)
-    if let Some(ref profile) = params.profile {
-        covecto_core::apply_profile(profile, &mut config);
-    }
-
-    let req = VectorizeRequest::new(img).with_config(config);
-    let result = core_vectorize(&req).map_err(AppError::Core)?;
+    // Decode, vectorize and convert off the async runtime (#55).
+    let max_dimension = state.limits().max_dimension;
+    let (result, body) = state
+        .run_job(ticket, move || -> Result<_, AppError> {
+            // Decode errors are the client's input (4xx); errors after a
+            // successful decode are ours (5xx).
+            let img =
+                load_image(&data[..], ImageLimits { max_dimension }).map_err(AppError::Decode)?;
+            drop(data);
+            let req = VectorizeRequest::new(img).with_config(config);
+            // core handles every format (SVG streams, PDF/EPS convert).
+            let mut body = Vec::new();
+            let result = render_to(&mut body, &req, output_format).map_err(AppError::Core)?;
+            Ok((result, body))
+        })
+        .await
+        .map_err(AppError::from)??;
 
     state.record_request(result.metadata.processing_time_ms);
 
@@ -207,23 +131,17 @@ pub async fn vectorize_handler(
         result.metadata.path_count,
     );
 
-    // Non-SVG formats: return raw bytes with content-type header
-    let output_format: OutputFormat = params
-        .format
-        .as_deref()
-        .unwrap_or("svg")
-        .parse::<OutputFormat>()
-        .map_err(|e: covecto_core::Error| AppError::BadRequest(e.to_string()))?;
-
+    // Non-SVG formats: return raw bytes with their content type.
     if output_format != OutputFormat::Svg {
-        let (bytes, content_type) =
-            convert_output(&result.svg, output_format).map_err(AppError::Core)?;
-        return Ok(([("content-type", content_type.as_str())], bytes).into_response());
+        return Ok(([("content-type", output_format.content_type())], body).into_response());
     }
 
-    // Default: JSON with SVG string
+    // Default: JSON with SVG string. covecto's SVG output is ASCII, so this
+    // conversion cannot fail in practice; treat a failure as our error.
+    let svg = String::from_utf8(body)
+        .map_err(|e| AppError::Core(covecto_core::Error::Conversion(e.to_string())))?;
     Ok(Json(VectorizeResponse {
-        svg: result.svg,
+        svg,
         engine_used: result.engine_used.to_string(),
         metadata: serde_json::to_value(result.metadata).unwrap_or_default(),
     })
@@ -241,45 +159,79 @@ pub async fn optimize_handler(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> Result<Json<OptimizeResponse>, AppError> {
-    let mut svg_data: Option<Vec<u8>> = None;
-    let mut preset = "default".to_string();
+    let ticket = state.admit().map_err(AppError::from)?;
+    let mut svg_data: Option<Bytes> = None;
+    let mut preset = OptimizePreset::Default;
     let mut multipass = false;
     let mut multipass_iterations = 10usize;
 
-    while let Some(field) = multipart.next_field().await.map_err(AppError::Multipart)? {
-        let name = field.name().unwrap_or("").to_string();
-        if name == "file" || name.is_empty() {
-            let bytes = field.bytes().await.map_err(AppError::Multipart)?;
-            svg_data = Some(bytes.to_vec());
-        } else {
-            let value = field.text().await.map_err(AppError::Multipart)?;
-            match name.as_str() {
-                "preset" => preset = value,
-                "multipass" => multipass = value.parse().unwrap_or(false),
-                "multipass_iterations" => multipass_iterations = value.parse().unwrap_or(10),
-                _ => {}
+    // A slow upload holds a queue place, so bound how long reading it may
+    // take (#60): otherwise slow clients could keep every place busy.
+    tokio::time::timeout(state.limits().upload_timeout, async {
+        let mut seen = std::collections::HashSet::new();
+        while let Some(field) = multipart.next_field().await.map_err(AppError::Multipart)? {
+            let name = field.name().unwrap_or("").to_string();
+            let key = field_key(&name);
+            let key = if key.is_empty() { "file".to_string() } else { key };
+            if !seen.insert(key.clone()) {
+                return Err(duplicate_field(&key));
+            }
+            if key == "file" {
+                svg_data = Some(field.bytes().await.map_err(AppError::Multipart)?);
+            } else {
+                let value = field.text().await.map_err(AppError::Multipart)?;
+                // Same strictness as /v1/vectorize: a bad value is a 400,
+                // never a silent fallback. `preset` here is the
+                // Optimization level, not a (vtracer) Preset.
+                let bad = |what: &str| AppError::BadRequest(format!("Invalid {what}: '{value}'"));
+                match key.as_str() {
+                    "preset" => {
+                        preset = value
+                            .parse::<OptimizePreset>()
+                            .map_err(|_| bad("optimization level (default, safe, none)"))?
+                    }
+                    "multipass" => {
+                        multipass = match value.trim().to_ascii_lowercase().as_str() {
+                            "true" | "1" | "yes" | "on" => true,
+                            "false" | "0" | "no" | "off" => false,
+                            _ => return Err(bad("multipass (true or false)")),
+                        }
+                    }
+                    "multipass_iterations" => {
+                        multipass_iterations = value
+                            .trim()
+                            .parse()
+                            .map_err(|_| bad("multipass_iterations (non-negative integer)"))?
+                    }
+                    other => {
+                        return Err(AppError::BadRequest(format!(
+                            "Unknown option '{other}'. Valid: file, preset, multipass, multipass_iterations"
+                        )));
+                    }
+                }
             }
         }
-    }
+        Ok::<(), AppError>(())
+    })
+    .await
+    .map_err(|_| AppError::UploadTimeout)??;
 
     let data = svg_data.ok_or(AppError::BadRequest("No file provided".into()))?;
-    let svg_str =
-        String::from_utf8(data).map_err(|e| AppError::BadRequest(format!("Invalid UTF-8: {e}")))?;
+    let svg_str = String::from_utf8(data.into())
+        .map_err(|e| AppError::BadRequest(format!("Invalid UTF-8: {e}")))?;
 
     let original_size = svg_str.len();
-    let opt_preset = match preset.as_str() {
-        "safe" => OptimizePreset::Safe,
-        "none" => OptimizePreset::None,
-        _ => OptimizePreset::Default,
-    };
-
     let config = OptimizeConfig {
-        preset: opt_preset,
+        preset,
         multipass,
         multipass_iterations,
     };
 
-    let optimized = optimize_svg(&svg_str, &config).map_err(AppError::Core)?;
+    let optimized = state
+        .run_job(ticket, move || optimize_svg(&svg_str, &config))
+        .await
+        .map_err(AppError::from)?
+        .map_err(AppError::Core)?;
     let optimized_size = optimized.len();
     let reduction_pct = if original_size > 0 {
         (1.0 - optimized_size as f64 / original_size as f64) * 100.0
@@ -297,18 +249,81 @@ pub async fn optimize_handler(
     }))
 }
 
+/// Field names are matched like Option names in core: case-insensitive,
+/// `-` and `_` interchangeable, leading `--` ignored.
+fn field_key(name: &str) -> String {
+    name.trim()
+        .trim_start_matches("--")
+        .to_ascii_lowercase()
+        .replace('-', "_")
+}
+
+fn duplicate_field(name: &str) -> AppError {
+    AppError::BadRequest(format!("Field '{name}' was sent more than once"))
+}
+
 pub enum AppError {
     BadRequest(String),
     Core(covecto_core::Error),
     Multipart(axum::extract::multipart::MultipartError),
+    /// The uploaded image could not be decoded (client input).
+    Decode(covecto_core::Error),
+    /// The job queue is full or no slot freed up in time.
+    Unavailable(&'static str),
+    /// The request body was not received within the upload timeout.
+    UploadTimeout,
+    /// The blocking job panicked or was cancelled.
+    Job(tokio::task::JoinError),
+}
+
+impl From<JobError> for AppError {
+    fn from(e: JobError) -> Self {
+        match e {
+            JobError::Busy => AppError::Unavailable("Server busy: job queue is full"),
+            JobError::Timeout => {
+                AppError::Unavailable("Server busy: timed out waiting for a job slot")
+            }
+            JobError::Failed(e) => AppError::Job(e),
+        }
+    }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            AppError::Core(e @ covecto_core::Error::ImageTooLarge { .. }) => {
+                (StatusCode::PAYLOAD_TOO_LARGE, e.to_string())
+            }
+            AppError::Decode(e) if e.is_too_large() => {
+                (StatusCode::PAYLOAD_TOO_LARGE, e.to_string())
+            }
+            AppError::Decode(e) if e.is_unsupported_format() => {
+                (StatusCode::UNSUPPORTED_MEDIA_TYPE, e.to_string())
+            }
+            AppError::Decode(e) => (StatusCode::BAD_REQUEST, e.to_string()),
+            AppError::UploadTimeout => (
+                StatusCode::REQUEST_TIMEOUT,
+                "Upload not received within the time limit".to_string(),
+            ),
+            AppError::Unavailable(msg) => {
+                let body = serde_json::json!({ "error": msg });
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(axum::http::header::RETRY_AFTER, "1")],
+                    Json(body),
+                )
+                    .into_response();
+            }
             AppError::Core(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             AppError::Multipart(e) => (StatusCode::BAD_REQUEST, e.to_string()),
+            AppError::Job(e) => {
+                tracing::error!("background job failed: {e}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal error while processing the request".to_string(),
+                )
+            }
         };
 
         let body = serde_json::json!({ "error": message });

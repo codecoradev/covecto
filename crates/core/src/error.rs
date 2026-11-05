@@ -35,24 +35,47 @@ pub enum Error {
 
     #[error("Conversion error: {0}")]
     Conversion(String),
+
+    /// An Option's value does not parse.
+    #[error("Invalid value '{value}' for option '{option}': expected {expected}")]
+    InvalidOption {
+        option: &'static str,
+        value: String,
+        expected: String,
+    },
+
+    /// An unknown Option, Profile or Preset name.
+    #[error("Unknown {what} '{name}'. Valid: {}", valid.join(", "))]
+    UnknownName {
+        /// `"option"`, `"profile"` or `"preset"`.
+        what: &'static str,
+        name: String,
+        valid: Vec<&'static str>,
+    },
+
+    /// The same Option was supplied more than once.
+    #[error("Option '{0}' was supplied more than once")]
+    DuplicateOption(&'static str),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Convenience: read and decode an image file.
-pub fn load_image(path: &std::path::Path) -> Result<image::RgbaImage> {
-    let img = image::open(path)?;
-    Ok(img.into_rgba8())
-}
+impl Error {
+    /// The image exceeds a size or memory limit (ours or the decoder's), as
+    /// opposed to being corrupt.
+    pub fn is_too_large(&self) -> bool {
+        matches!(
+            self,
+            Error::ImageTooLarge { .. } | Error::ImageDecode(image::ImageError::Limits(_))
+        )
+    }
 
-/// Convenience: load from bytes with optional format hint.
-pub fn load_image_from_bytes(data: &[u8], format_hint: Option<&str>) -> Result<image::RgbaImage> {
-    let img = if let Some(fmt) = format_hint {
-        let format = image::ImageFormat::from_extension(fmt)
-            .ok_or_else(|| Error::UnsupportedFormat(fmt.to_string()))?;
-        image::load_from_memory_with_format(data, format)?
-    } else {
-        image::load_from_memory(data)?
-    };
-    Ok(img.into_rgba8())
+    /// The input is not in an image format covecto can decode (unknown or
+    /// unsupported format), as opposed to a recognized but corrupt image.
+    pub fn is_unsupported_format(&self) -> bool {
+        matches!(
+            self,
+            Error::UnsupportedFormat(_) | Error::ImageDecode(image::ImageError::Unsupported(_))
+        )
+    }
 }

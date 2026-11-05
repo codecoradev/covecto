@@ -19,6 +19,22 @@ Smooth Bézier curves via [vtracer](https://github.com/visioncortex/vtracer). Be
 - **Configurable** — many parameters for fine-tuning
 - **Presets** — `bw`, `poster`, `photo` for quick setup
 - **Larger files** — more control points than PixelExact
+- **Input budget** — images above 2 MP are downscaled before tracing (see below)
+
+## Large Images
+
+vtracer's cost grows faster than the pixel count (on a noisy photo: 1 MP ≈ 10 s,
+2 MP ≈ 38 s, 4 MP ≈ 108 s, 16 MP did not finish in 150 s). Spline output also
+discards fine detail anyway, so inputs above the budget are downscaled
+(area averaging) before tracing. The SVG keeps the original `width`/`height`
+and maps the traced coordinates with `viewBox`, so it displays at full size.
+
+```bash
+covecto big.jpg --engine spline --spline-max-mp 1 -o big.svg   # faster, smaller
+covecto big.jpg --engine spline --spline-max-mp 0 -o big.svg   # trace at full size
+```
+
+PixelExact is never downscaled.
 
 ## Example
 

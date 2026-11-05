@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Covecto API
-  version: 0.1.0
+  version: 0.2.0
   description: Dual-engine image vectorization — pixel-exact for icons, smooth curves for art.
   license:
     name: MIT
@@ -31,7 +31,7 @@ paths:
                     example: ok
                   version:
                     type: string
-                    example: "0.1.0"
+                    example: "0.2.0"
 
   /v1/metrics:
     get:
@@ -89,11 +89,11 @@ paths:
                 preset:
                   type: string
                   enum: [bw, poster, photo]
-                  description: vtracer preset (overrides individual params)
+                  description: Preset, a vtracer starting point for Spline parameters (never chooses the engine). Applied as defaults < preset < profile < fields you send.
                 profile:
                   type: string
                   enum: [icon, logo, photo, lineart]
-                  description: Custom preset that tunes multiple params at once
+                  description: Profile, a covecto bundle for a kind of image; may choose the engine. Fields you send win over it.
                 optimize:
                   type: boolean
                   default: true
@@ -159,6 +159,10 @@ paths:
                   type: integer
                   minimum: 0
                   description: Path coordinate precision (decimal places)
+                spline_max_mp:
+                  type: number
+                  minimum: 0
+                  description: Spline input budget in megapixels; larger images are downscaled before tracing (output keeps the original size via viewBox). Can only lower the server cap COVECTO_SPLINE_MAX_MP (default 2).
       responses:
         '200':
           description: Vectorization successful
@@ -181,14 +185,42 @@ paths:
               description: PDF output (when format=pdf)
             application/postscript:
               description: EPS output (when format=eps)
+        '413':
+          description: Image width or height exceeds COVECTO_MAX_DIMENSION (checked before decoding)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '400':
-          description: Bad request (missing file, invalid params)
+          description: Bad request (missing file, invalid params, corrupt image data)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '415':
+          description: The upload is not in a supported image format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '408':
+          description: The request body was not received within COVECTO_UPLOAD_TIMEOUT_SECS
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Server busy (job queue full, or timed out waiting for a job slot). Retry after the Retry-After header.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '500':
-          description: Internal error (image loading, vectorization failure)
+          description: Internal error (vectorization or conversion failure)
           content:
             application/json:
               schema:
@@ -252,6 +284,22 @@ paths:
                     example: 46.7
         '400':
           description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '408':
+          description: The request body was not received within COVECTO_UPLOAD_TIMEOUT_SECS
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Server busy (job queue full, or timed out waiting for a job slot). Retry after the Retry-After header.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
           content:
             application/json:
               schema:

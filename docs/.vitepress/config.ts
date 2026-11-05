@@ -54,6 +54,7 @@ export default createConfig({
       text: 'Rust Library',
       items: [
         { text: 'Using as a Crate', link: '/library' },
+        { text: 'Upgrading to 0.2', link: '/migration-0.2' },
       ],
     },
   ],

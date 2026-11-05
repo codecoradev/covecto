@@ -4,7 +4,7 @@ title: Profiles
 
 # Profiles
 
-Profiles are pre-configured parameter sets for common use cases. They override individual parameters.
+Profiles are pre-configured parameter sets for common use cases. A profile is applied on top of defaults and any `--preset`; flags you type yourself always win over it (for example `--profile icon --corner-threshold 120` keeps 120). An unknown profile name is an error.
 
 ## Built-in Profiles
 

@@ -46,22 +46,15 @@ impl OutputFormat {
     }
 }
 
-/// Convert an SVG string to the target output format.
-/// Returns the converted bytes and the MIME content type.
-pub fn convert_output(svg: &str, format: OutputFormat) -> Result<(Vec<u8>, String)> {
+/// Convert an SVG string to the target output format. The MIME type is
+/// [`OutputFormat::content_type`].
+///
+/// To vectorize an image straight into a format, use [`crate::render_to`].
+pub fn convert_output(svg: &str, format: OutputFormat) -> Result<Vec<u8>> {
     match format {
-        OutputFormat::Svg => Ok((
-            svg.as_bytes().to_vec(),
-            OutputFormat::Svg.content_type().to_string(),
-        )),
-        OutputFormat::Pdf => {
-            let pdf_bytes = svg_to_pdf(svg)?;
-            Ok((pdf_bytes, OutputFormat::Pdf.content_type().to_string()))
-        }
-        OutputFormat::Eps => {
-            let eps_bytes = svg_to_eps(svg)?;
-            Ok((eps_bytes, OutputFormat::Eps.content_type().to_string()))
-        }
+        OutputFormat::Svg => Ok(svg.as_bytes().to_vec()),
+        OutputFormat::Pdf => svg_to_pdf(svg),
+        OutputFormat::Eps => svg_to_eps(svg),
     }
 }
 
@@ -249,23 +242,20 @@ mod tests {
 
     #[test]
     fn test_svg_passthrough() {
-        let (bytes, ct) = convert_output(SAMPLE_SVG, OutputFormat::Svg).unwrap();
-        assert_eq!(ct, "image/svg+xml");
+        let bytes = convert_output(SAMPLE_SVG, OutputFormat::Svg).unwrap();
         assert!(bytes.starts_with(b"<svg"));
     }
 
     #[test]
     fn test_svg_to_pdf() {
-        let (bytes, ct) = convert_output(SAMPLE_SVG, OutputFormat::Pdf).unwrap();
-        assert_eq!(ct, "application/pdf");
+        let bytes = convert_output(SAMPLE_SVG, OutputFormat::Pdf).unwrap();
         // PDF files start with %PDF
         assert!(bytes.starts_with(b"%PDF"));
     }
 
     #[test]
     fn test_svg_to_eps() {
-        let (bytes, ct) = convert_output(SAMPLE_SVG, OutputFormat::Eps).unwrap();
-        assert_eq!(ct, "application/eps");
+        let bytes = convert_output(SAMPLE_SVG, OutputFormat::Eps).unwrap();
         let s = String::from_utf8(bytes).unwrap();
         assert!(s.starts_with("%!PS-Adobe-3.0 EPSF-3.0"));
         assert!(s.contains("%%BoundingBox:"));
@@ -274,7 +264,7 @@ mod tests {
 
     #[test]
     fn test_eps_contains_paths() {
-        let (bytes, _) = convert_output(SAMPLE_SVG, OutputFormat::Eps).unwrap();
+        let bytes = convert_output(SAMPLE_SVG, OutputFormat::Eps).unwrap();
         let s = String::from_utf8(bytes).unwrap();
         // Should contain PostScript drawing commands
         assert!(s.contains("newpath") || s.contains("moveto"));

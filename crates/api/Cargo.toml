@@ -13,7 +13,7 @@ name = "covecto-api"
 path = "src/main.rs"
 
 [dependencies]
-covecto-core = { workspace = true, version = "0.1" }
+covecto-core = { workspace = true, version = "0.2" }
 axum = { workspace = true }
 tokio = { workspace = true }
 tower-http = { workspace = true }
@@ -26,3 +26,5 @@ anyhow = { workspace = true }
 
 [dev-dependencies]
 http-body-util = { workspace = true }
+image = { workspace = true }
+futures-util = { version = "0.3", default-features = false }
