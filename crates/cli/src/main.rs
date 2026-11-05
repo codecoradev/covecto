@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use clap::{Parser, Subcommand};
 use covecto_core::{
-    Engine, OutputFormat, VectorizeConfig, convert_output, load_image, options, select_engine,
-    vectorize, vectorize_to,
+    Engine, ImageLimits, OutputFormat, VectorizeConfig, convert_output, load_image, options,
+    select_engine, vectorize, vectorize_to,
 };
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
@@ -136,6 +136,10 @@ struct VectorizeArgs {
     /// Preview what would be processed without actually vectorizing
     #[arg(long)]
     dry_run: bool,
+    /// Refuse images wider or taller than this many pixels, checked before
+    /// decoding (default: 8192; 0 = no limit)
+    #[arg(long, value_name = "PX", default_value_t = covecto_core::DEFAULT_MAX_DIMENSION)]
+    max_dimension: u32,
 }
 
 #[derive(Clone)]
@@ -152,6 +156,8 @@ struct VectorizeOpts {
     json_pretty: bool,
     no_progress: bool,
     dry_run: bool,
+    /// Applied to every image before decoding.
+    limits: ImageLimits,
 }
 
 impl VectorizeOpts {
@@ -244,8 +250,9 @@ fn vectorize_single_raw(
     output: Option<&Path>,
     config: &VectorizeConfig,
     format: &OutputFormat,
+    limits: ImageLimits,
 ) -> anyhow::Result<(covecto_core::VectorizeResult, usize, PathBuf)> {
-    let img = load_image(input)?;
+    let img = load_image(input, limits)?;
     let req = covecto_core::VectorizeRequest::new(img).with_config(config.clone());
 
     let out_path = match output {
@@ -434,11 +441,15 @@ fn compute_output_path(
 /// preview cannot drift from a real run. Only an `Auto` Engine needs the
 /// image's pixels; a configured Engine (flag or Profile) is shown without
 /// reading the file.
-fn preview_engine(file: &Path, config: &VectorizeConfig) -> anyhow::Result<String> {
+fn preview_engine(
+    file: &Path,
+    config: &VectorizeConfig,
+    limits: ImageLimits,
+) -> anyhow::Result<String> {
     if config.engine != Engine::Auto {
         return Ok(config.engine.to_string());
     }
-    let img = load_image(file)?;
+    let img = load_image(file, limits)?;
     Ok(format!("{} (auto)", select_engine(config, &img)))
 }
 
@@ -464,7 +475,7 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
                 let stem = file.file_stem().unwrap().to_string_lossy().to_string();
                 PathBuf::from(apply_output_template(template, &stem, ext))
             });
-            let engine = preview_engine(file, &config)
+            let engine = preview_engine(file, &config, opts.limits)
                 .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", file.display()))?;
             println!(
                 "Would process: {} → {} (engine: {}, format: {})",
@@ -493,7 +504,7 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
                 None
             };
 
-            match vectorize_single_raw(file, Some(&out_path), &config, &format) {
+            match vectorize_single_raw(file, Some(&out_path), &config, &format, opts.limits) {
                 Ok((result, bytes, out)) => {
                     if let Some(s) = spinner {
                         s.finish_and_clear();
@@ -525,14 +536,14 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
                 None
             };
 
-            let res = vectorize_single_raw(file, Some(&out_path), &config, &format);
+            let res = vectorize_single_raw(file, Some(&out_path), &config, &format, opts.limits);
             if let Some(s) = spinner {
                 s.finish_and_clear();
             }
             res?;
         } else {
             // No --output and no --json: write to stdout (backward compat)
-            let img = load_image(file)?;
+            let img = load_image(file, opts.limits)?;
             let req = covecto_core::VectorizeRequest::new(img).with_config(config.clone());
             let result = vectorize(&req)?;
             let (bytes, _ct) = convert_output(&result.svg, format)?;
@@ -557,7 +568,7 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
         // listing keeps input order.
         let previews: Vec<anyhow::Result<String>> = files
             .par_iter()
-            .map(|file| preview_engine(file, &config))
+            .map(|file| preview_engine(file, &config, opts.limits))
             .collect();
         println!("Would process {} files:", files.len());
         let mut unreadable = 0usize;
@@ -637,7 +648,7 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
         .zip(out_paths.par_iter())
         .enumerate()
         .filter_map(|(idx, (file, out_path))| {
-            let res = vectorize_single_raw(file, Some(out_path), &config, &format);
+            let res = vectorize_single_raw(file, Some(out_path), &config, &format, opts.limits);
             if let Some(ref p) = pb {
                 p.inc(1);
             }
@@ -756,6 +767,9 @@ fn from_args(args: VectorizeArgs) -> VectorizeOpts {
         json_pretty: args.json_pretty,
         no_progress: args.no_progress,
         dry_run: args.dry_run,
+        limits: ImageLimits {
+            max_dimension: args.max_dimension,
+        },
     }
 }
 
@@ -934,12 +948,22 @@ mod tests {
         // A configured Engine is shown without reading the file at all.
         let spline = config_of(&["covecto", "x.png", "--engine", "spline"]).unwrap();
         assert_eq!(
-            preview_engine(Path::new("/does/not/exist.png"), &spline).unwrap(),
+            preview_engine(
+                Path::new("/does/not/exist.png"),
+                &spline,
+                ImageLimits::default()
+            )
+            .unwrap(),
             "spline"
         );
         let profile = config_of(&["covecto", "x.png", "--profile", "icon"]).unwrap();
         assert_eq!(
-            preview_engine(Path::new("/does/not/exist.png"), &profile).unwrap(),
+            preview_engine(
+                Path::new("/does/not/exist.png"),
+                &profile,
+                ImageLimits::default()
+            )
+            .unwrap(),
             "spline"
         );
         // Auto: the preview is exactly core's decision for this image.
@@ -950,14 +974,22 @@ mod tests {
             "shapes-512x512.png",
         ] {
             let file = fixture(name);
-            let expected = select_engine(&auto, &load_image(&file).unwrap());
+            let expected =
+                select_engine(&auto, &load_image(&file, ImageLimits::default()).unwrap());
             assert_eq!(
-                preview_engine(&file, &auto).unwrap(),
+                preview_engine(&file, &auto, ImageLimits::default()).unwrap(),
                 format!("{expected} (auto)"),
                 "{name}"
             );
         }
-        assert!(preview_engine(Path::new("/does/not/exist.png"), &auto).is_err());
+        assert!(
+            preview_engine(
+                Path::new("/does/not/exist.png"),
+                &auto,
+                ImageLimits::default()
+            )
+            .is_err()
+        );
     }
 
     /// A fresh temp directory, removed on drop (also when a test panics).
@@ -1007,6 +1039,28 @@ mod tests {
             out.join("good.svg").exists(),
             "good files are still converted"
         );
+    }
+
+    #[test]
+    fn max_dimension_limits_cli_loads() {
+        // The CLI applies the same pre-decode limit as the API (default 8192).
+        assert_eq!(
+            opts_of(&["covecto", "x.png"]).limits,
+            ImageLimits::default()
+        );
+        let tmp = TempDir::new("maxdim");
+        let input = fixture("icon-32x32.png");
+        let out = tmp.0.join("o.svg");
+        let (i, o) = (input.to_str().unwrap(), out.to_str().unwrap());
+
+        let small = opts_of(&["covecto", i, "-o", o, "--max-dimension", "16"]);
+        let err = cmd_vectorize(&input, &small).unwrap_err().to_string();
+        assert!(err.contains("too large") && err.contains("32x32"), "{err}");
+        assert!(!out.exists());
+
+        let unlimited = opts_of(&["covecto", i, "-o", o, "--max-dimension", "0"]);
+        cmd_vectorize(&input, &unlimited).unwrap();
+        assert!(out.exists());
     }
 
     #[test]
