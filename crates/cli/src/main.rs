@@ -236,19 +236,37 @@ fn apply_output_template(template: &str, stem: &str, ext: &str) -> String {
     template.replace("{stem}", stem).replace("{ext}", ext)
 }
 
-/// A unique temporary path in the same directory as `path` (same filesystem,
-/// so the final rename is atomic).
-fn temp_sibling(path: &Path) -> PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let name = path
-        .file_name()
-        .map_or_else(|| "output".into(), |n| n.to_string_lossy().into_owned());
-    path.with_file_name(format!(
-        ".{name}.covecto-tmp-{}-{nanos}",
-        std::process::id()
-    ))
+/// Create a new, unique temporary file next to `target` (same filesystem,
+/// so the final rename is atomic). Uses `create_new`, so it never follows a
+/// symlink or reuses an existing file; the name is short so a long target
+/// name cannot push it past filesystem limits.
+fn create_temp_sibling(target: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = target.parent().unwrap_or(Path::new("."));
+    loop {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!(".covecto-{}-{n}.tmp", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Where the output really goes: an existing symlink at `out_path` is
+/// followed, so its target is replaced and the link stays intact.
+fn resolve_output(out_path: &Path) -> PathBuf {
+    match std::fs::symlink_metadata(out_path) {
+        Ok(m) if m.file_type().is_symlink() => {
+            std::fs::canonicalize(out_path).unwrap_or_else(|_| out_path.to_path_buf())
+        }
+        _ => out_path.to_path_buf(),
+    }
 }
 
 /// Vectorize one file into `output` (or next to the input) in `format`.
@@ -285,16 +303,23 @@ fn vectorize_single_raw(
 
     // core picks the strategy per format (SVG streams; PDF/EPS convert in
     // memory first). Write next to the target, then rename into place.
-    let tmp_path = temp_sibling(&out_path);
-    let mut writer = std::io::BufWriter::new(std::fs::File::create(&tmp_path)?);
+    let target = resolve_output(&out_path);
+    let (tmp_path, tmp_file) = create_temp_sibling(&target)?;
+    let mut writer = std::io::BufWriter::new(tmp_file);
     let rendered = (|| -> anyhow::Result<RenderResult> {
         let result = render_to(&mut writer, &req, *format)?;
         writer.flush()?;
         Ok(result)
     })();
-    drop(writer);
+    drop(writer); // close before rename (required on Windows)
     let result = match rendered.and_then(|r| {
-        std::fs::rename(&tmp_path, &out_path)?;
+        // Replacing a file keeps its permissions.
+        if let Ok(meta) = std::fs::metadata(&target)
+            && meta.is_file()
+        {
+            std::fs::set_permissions(&tmp_path, meta.permissions())?;
+        }
+        std::fs::rename(&tmp_path, &target)?;
         Ok(r)
     }) {
         Ok(result) => result,
@@ -1097,7 +1122,7 @@ mod tests {
         std::fs::read_dir(dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|n| n.contains("covecto-tmp"))
+            .filter(|n| n.starts_with(".covecto-") && n.ends_with(".tmp"))
             .collect()
     }
 
@@ -1136,6 +1161,39 @@ mod tests {
         );
         assert!(res.is_err());
         assert_eq!(std::fs::read(&existing).unwrap(), b"previous");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_keeps_permissions_and_follows_symlinks() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new("perms");
+        let input = fixture("icon-32x32.png");
+        let config = config_of(&["covecto", "x.png"]).unwrap();
+        let real = tmp.0.join("real.svg");
+        std::fs::write(&real, b"previous").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let link = tmp.0.join("link.svg");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        vectorize_single_raw(
+            &input,
+            Some(&link),
+            &config,
+            &OutputFormat::Svg,
+            ImageLimits::default(),
+        )
+        .unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(std::fs::read(&real).unwrap().starts_with(b"<svg"));
+        let mode = std::fs::metadata(&real).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
+        assert!(leftovers(&tmp.0).is_empty());
     }
 
     #[test]
