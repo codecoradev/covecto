@@ -37,7 +37,7 @@ Run multiple optimization passes for better compression:
 covecto input.png --optimize --multipass -o output.svg
 
 # Custom iteration count
-covecto input.png --optimize --multipass --multipass-iterations 20 -o output.svg
+covecto input.png --optimize --multipass --multipass-iterations 16 -o output.svg
 ```
 
 ## Standalone Optimization

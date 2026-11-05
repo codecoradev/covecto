@@ -23,7 +23,7 @@ pub use error::{
     load_image_from_bytes_with_limit,
 };
 pub use export::{OutputFormat, convert_output};
-pub use optimize::optimize_svg;
+pub use optimize::{MAX_MULTIPASS_ITERATIONS, optimize_svg};
 
 use image::RgbaImage;
 use serde::{Deserialize, Serialize};

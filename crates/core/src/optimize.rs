@@ -10,7 +10,14 @@ use crate::Result;
 use crate::config::{OptimizeConfig, OptimizePreset};
 use std::borrow::Cow;
 
+/// Upper bound on multipass iterations, whatever the caller asks for. Each
+/// pass is linear, but input such as nested comments shrinks by only one
+/// layer per pass, so an unbounded count is a CPU-exhaustion vector.
+pub const MAX_MULTIPASS_ITERATIONS: usize = 16;
+
 /// Optimize an SVG string.
+///
+/// `config.multipass_iterations` is clamped to [`MAX_MULTIPASS_ITERATIONS`].
 pub fn optimize_svg(svg: &str, config: &OptimizeConfig) -> Result<String> {
     if matches!(config.preset, OptimizePreset::None) {
         return Ok(svg.to_string());
@@ -21,7 +28,7 @@ pub fn optimize_svg(svg: &str, config: &OptimizeConfig) -> Result<String> {
     // Multipass
     if config.multipass {
         let mut prev = output;
-        for _ in 0..config.multipass_iterations {
+        for _ in 0..config.multipass_iterations.min(MAX_MULTIPASS_ITERATIONS) {
             let next = optimize_once(&prev, config.preset);
             if next.len() >= prev.len() {
                 break;
@@ -304,6 +311,10 @@ fn shorten_numbers_in(d: &str, out: &mut String) {
     let bytes = d.as_bytes();
     let len = bytes.len();
     let mut i = 0;
+    // Inside an arc command (a/A) the flags are single digits that may be
+    // written without separators ("a1,1,0,01.0,2" = flags 0 and 1, then
+    // 1.0): number boundaries are ambiguous there, so copy it verbatim.
+    let mut in_arc = false;
     while i < len {
         // A number starts with a digit, or `.digit`, optionally after `-`.
         let digit_at = |j: usize| j < len && bytes[j].is_ascii_digit();
@@ -319,6 +330,22 @@ fn shorten_numbers_in(d: &str, out: &mut String) {
             let next = d[i + step..]
                 .find(|c: char| c.is_ascii_digit() || c == '-' || c == '.')
                 .map_or(len, |p| i + step + p);
+            if let Some(cmd) = d[i..next]
+                .chars()
+                .rev()
+                .find(|c| "MmLlHhVvCcSsQqTtAaZz".contains(*c))
+            {
+                in_arc = cmd == 'a' || cmd == 'A';
+            }
+            out.push_str(&d[i..next]);
+            i = next;
+            continue;
+        }
+        if in_arc {
+            // Copy the arc's numbers and separators up to the next command.
+            let next = d[i..]
+                .find(|c: char| c.is_ascii_alphabetic() && c != 'e' && c != 'E')
+                .map_or(len, |p| i + p);
             out.push_str(&d[i..next]);
             i = next;
             continue;
@@ -690,6 +717,36 @@ mod tests {
         assert_eq!(
             shorten_path_numbers(r#"<path d="M1.50½2.0"/>"#).unwrap(),
             r#"<path d="M1.5½2"/>"#
+        );
+    }
+
+    #[test]
+    fn test_shorten_numbers_skips_arc_arguments() {
+        // Arc flags may be unseparated: "0,01.0" = flag 0, flag 1, then 1.0.
+        let input = r#"<path d="M1.50 2a1,1,0,01.0,2L3.0 4.50"/>"#;
+        assert_eq!(
+            shorten_path_numbers(input).unwrap(),
+            r#"<path d="M1.5 2a1,1,0,01.0,2L3 4.5"/>"#
+        );
+    }
+
+    #[test]
+    fn test_multipass_iterations_are_capped() {
+        // Nested comments shrink by one layer per pass; a huge requested
+        // iteration count must not translate into unbounded work.
+        let depth = 2_000;
+        let doc = format!("<svg>{}{}</svg>", "<!-".repeat(depth), "-->".repeat(depth));
+        let config = OptimizeConfig {
+            preset: OptimizePreset::Default,
+            multipass: true,
+            multipass_iterations: usize::MAX,
+        };
+        let t = std::time::Instant::now();
+        let _ = optimize_svg(&doc, &config).unwrap();
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            t.elapsed()
         );
     }
 

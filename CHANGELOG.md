@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optimizer: numbers starting with `.` (`.5`, `-.5`) are parsed as numbers, so compact path data like `M.5.0` no longer loses a coordinate
 - PixelExact and engine auto-selection use 64-bit pixel index math (u32 overflowed above ~32k px per side)
 - Optimizer: unterminated markup (`<` without `>`) no longer makes empty-element removal quadratic; non-ASCII characters inside `d` values no longer panic; added a deterministic fuzz test over all passes
+- Optimizer: multipass iterations are capped at `MAX_MULTIPASS_ITERATIONS` (16); a client-supplied `multipass_iterations` could hold an API job slot for a very long time on nested-comment input
+- Optimizer: path numbers inside arc commands (`a`/`A`) are left as-is, since unseparated flags like `0,01.0` cannot be shortened safely
 - CLI `--optimize` could not be turned off; added `--optimize=false` and `--no-optimize` (#58)
 - CLI: `vectorize` is now the default subcommand, so the documented `covecto input.png -o out.svg` works (#58)
 

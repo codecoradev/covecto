@@ -122,7 +122,7 @@ Optimize an existing SVG.
 | `file` | binary | ✅ | SVG file to optimize |
 | `preset` | string | — | `default`, `safe`, `none` (default: `default`) |
 | `multipass` | boolean | — | Multiple passes (default: `false`) |
-| `multipass_iterations` | int | — | Pass count (default: `10`) |
+| `multipass_iterations` | int | — | Pass count (default: `10`, capped at `16`) |
 
 **Response** `200`
 
