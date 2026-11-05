@@ -516,3 +516,94 @@ async fn test_stalled_upload_times_out_and_frees_its_place() {
     );
     assert_eq!(state.admitted(), 0, "the queue place must be released");
 }
+
+fn multipart_with_fields(fields: &[(&str, &str)]) -> Request<Body> {
+    let boundary = "opts";
+    let bytes = fixture_bytes("icon-32x32.png");
+    let mut parts: Vec<(&str, &str, &[u8])> = vec![("file", "icon-32x32.png", &bytes)];
+    for (name, value) in fields {
+        parts.push((name, "", value.as_bytes()));
+    }
+    let body = build_multipart(boundary, &parts);
+    Request::builder()
+        .method("POST")
+        .uri("/v1/vectorize")
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap()
+}
+
+async fn error_of(resp: axum::response::Response) -> (StatusCode, String) {
+    let status = resp.status();
+    let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    (
+        status,
+        json["error"].as_str().unwrap_or_default().to_string(),
+    )
+}
+
+#[tokio::test]
+async fn test_invalid_option_values_are_400_not_ignored() {
+    // Options resolved by covecto-core: bad values used to be silently dropped.
+    for (fields, needle) in [
+        (vec![("color_mode", "purple")], "color_mode"),
+        (vec![("filter_speckle", "abc")], "filter_speckle"),
+        (vec![("profile", "icn")], "icon, logo"),
+        (vec![("colour_precision", "4")], "colour_precision"),
+        (
+            vec![("color_precision", "4"), ("color_precision", "5")],
+            "more than once",
+        ),
+    ] {
+        let (status, error) =
+            error_of(app().oneshot(multipart_with_fields(&fields)).await.unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{fields:?}");
+        assert!(error.contains(needle), "{fields:?}: {error}");
+    }
+}
+
+#[tokio::test]
+async fn test_profile_with_explicit_option_is_accepted() {
+    let resp = app()
+        .oneshot(multipart_with_fields(&[
+            ("profile", "icon"),
+            ("corner_threshold", "120"),
+        ]))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_optimize_endpoint_rejects_bad_optimization_level() {
+    let boundary = "optlvl";
+    let body = build_multipart(
+        boundary,
+        &[
+            (
+                "file",
+                "a.svg",
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+            ),
+            ("preset", "", b"aggressive"),
+        ],
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/optimize")
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let (status, error) = error_of(app().oneshot(req).await.unwrap()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(error.contains("optimization level"), "{error}");
+}

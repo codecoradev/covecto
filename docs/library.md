@@ -66,6 +66,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Building a config from user options
+
+If your app takes options from users (a form, a config file, an FFI map),
+let core apply the same rules as the CLI and the API: defaults < Preset <
+Profile < explicit options, with errors for unknown names and bad values.
+
+```rust
+use covecto_core::{options, vectorize, VectorizeRequest};
+
+let config = options::resolve([("profile", "icon"), ("corner_threshold", "120")])?;
+assert_eq!(config.corner_threshold, Some(120)); // explicit option beats the profile
+
+let result = vectorize(&VectorizeRequest::new(img).with_config(config))?;
+```
+
+`options::OPTIONS` lists every option with its type and a help line.
+
 ## SVG Optimization
 
 ```rust

@@ -5,9 +5,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use clap::{Parser, Subcommand};
 use covecto_core::{
-    ColorMode, Engine, HierarchicalMode, OptimizeConfig, OptimizePreset, OutputFormat,
-    PathSimplifyMode, SplinePreset, VectorizeConfig, convert_output, load_image, vectorize,
-    vectorize_to,
+    OutputFormat, VectorizeConfig, convert_output, load_image, options, vectorize, vectorize_to,
 };
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
@@ -53,12 +51,13 @@ struct VectorizeArgs {
     #[arg(short = 'F', long, default_value = "svg")]
     format: String,
     /// Engine: auto, spline, pixel-exact (default: auto)
-    #[arg(short, long, default_value = "auto")]
-    engine: String,
-    /// vtracer preset: bw, poster, photo (overrides individual params)
+    #[arg(short, long)]
+    engine: Option<String>,
+    /// Preset (vtracer starting point for Spline parameters): bw, poster, photo
     #[arg(long)]
     preset: Option<String>,
-    /// Custom preset: icon, logo, photo, lineart (overrides individual params)
+    /// Profile (may also choose the Engine): icon, logo, photo, lineart.
+    /// Explicit flags always win over the Profile and the Preset.
     #[arg(long)]
     profile: Option<String>,
     /// Color quantization precision (1-32, higher = more colors)
@@ -103,25 +102,24 @@ struct VectorizeArgs {
     #[arg(
         long,
         value_name = "BOOL",
-        default_value_t = true,
         action = clap::ArgAction::Set,
         num_args = 0..=1,
         require_equals = true,
         default_missing_value = "true"
     )]
-    optimize: bool,
+    optimize: Option<bool>,
     /// Disable SVG optimization (same as `--optimize=false`)
     #[arg(long, conflicts_with = "optimize")]
     no_optimize: bool,
-    /// Optimization preset: default, safe, none
-    #[arg(long, default_value = "default")]
-    optimize_preset: String,
+    /// Optimization level: default, safe, none (default: default)
+    #[arg(long)]
+    optimize_preset: Option<String>,
     /// Run multiple optimization passes
     #[arg(long)]
     multipass: bool,
-    /// Number of multipass iterations (default: 10)
-    #[arg(long, default_value = "10")]
-    multipass_iterations: usize,
+    /// Number of multipass iterations (default: 10, capped at 16)
+    #[arg(long)]
+    multipass_iterations: Option<usize>,
     /// Recursively scan input directories
     #[arg(short = 'R', long)]
     recursive: bool,
@@ -139,68 +137,15 @@ struct VectorizeArgs {
     dry_run: bool,
 }
 
-fn parse_engine(s: &str) -> anyhow::Result<Engine> {
-    s.parse::<Engine>()
-        .map_err(|e| anyhow::anyhow!(e.to_string()))
-}
-
-fn parse_spline_preset(s: &str) -> anyhow::Result<SplinePreset> {
-    s.parse::<SplinePreset>()
-        .map_err(|e| anyhow::anyhow!(e.to_string()))
-}
-
-fn parse_opt_preset(s: &str) -> OptimizePreset {
-    match s.to_lowercase().as_str() {
-        "safe" => OptimizePreset::Safe,
-        "none" => OptimizePreset::None,
-        _ => OptimizePreset::Default,
-    }
-}
-
-fn parse_color_mode(s: &str) -> anyhow::Result<ColorMode> {
-    s.parse::<ColorMode>()
-        .map_err(|e| anyhow::anyhow!(e.to_string()))
-}
-
-fn parse_hierarchical(s: &str) -> anyhow::Result<HierarchicalMode> {
-    s.parse::<HierarchicalMode>()
-        .map_err(|e| anyhow::anyhow!(e.to_string()))
-}
-
-fn parse_path_simplify(s: &str) -> anyhow::Result<PathSimplifyMode> {
-    s.parse::<PathSimplifyMode>()
-        .map_err(|e| anyhow::anyhow!(e.to_string()))
-}
-
-fn apply_profile(name: &str, config: &mut VectorizeConfig) {
-    covecto_core::apply_profile(name, config);
-}
-
 #[derive(Clone)]
 struct VectorizeOpts {
     output: Option<PathBuf>,
     output_dir: Option<PathBuf>,
     output_template: Option<String>,
     format: String,
-    engine: String,
-    preset: Option<String>,
-    profile: Option<String>,
-    color_precision: Option<i32>,
-    filter_speckle: Option<usize>,
-    corner_threshold: Option<i32>,
-    splice_threshold: Option<i32>,
-    color_mode: Option<String>,
-    hierarchical: Option<String>,
-    path_simplify: Option<String>,
-    layer_difference: Option<i32>,
-    length_threshold: Option<f64>,
-    max_iterations: Option<usize>,
-    path_precision: Option<u32>,
-    spline_max_mp: Option<f64>,
-    optimize: bool,
-    optimize_preset: String,
-    multipass: bool,
-    multipass_iterations: usize,
+    /// Explicit options only (what the user actually typed), as canonical
+    /// `(name, value)` pairs for `covecto_core::options::resolve`.
+    options: Vec<(&'static str, String)>,
     recursive: bool,
     json: bool,
     json_pretty: bool,
@@ -210,50 +155,33 @@ struct VectorizeOpts {
 
 impl VectorizeOpts {
     fn to_config(&self) -> anyhow::Result<VectorizeConfig> {
-        let mut config = VectorizeConfig {
-            engine: parse_engine(&self.engine)?,
-            optimize: self.optimize,
-            optimize_config: OptimizeConfig {
-                preset: parse_opt_preset(&self.optimize_preset),
-                multipass: self.multipass,
-                multipass_iterations: self.multipass_iterations,
-            },
-            spline_preset: self
-                .preset
-                .as_deref()
-                .map(parse_spline_preset)
-                .transpose()?,
-            color_precision: self.color_precision,
-            filter_speckle: self.filter_speckle,
-            corner_threshold: self.corner_threshold,
-            splice_threshold: self.splice_threshold,
-            color_mode: self
-                .color_mode
-                .as_deref()
-                .map(parse_color_mode)
-                .transpose()?,
-            hierarchical: self
-                .hierarchical
-                .as_deref()
-                .map(parse_hierarchical)
-                .transpose()?,
-            path_simplify_mode: self
-                .path_simplify
-                .as_deref()
-                .map(parse_path_simplify)
-                .transpose()?,
-            layer_difference: self.layer_difference,
-            length_threshold: self.length_threshold,
-            max_iterations: self.max_iterations,
-            path_precision: self.path_precision,
-            spline_max_megapixels: self.spline_max_mp,
-        };
+        options::resolve(self.options.iter().map(|(k, v)| (*k, v.as_str()))).map_err(cli_error)
+    }
+}
 
-        if let Some(ref profile) = self.profile {
-            apply_profile(profile, &mut config);
+/// Report an options error with the flag spelling the user typed.
+fn cli_error(e: covecto_core::Error) -> anyhow::Error {
+    let flag = |name: &str| format!("--{}", name.replace('_', "-"));
+    match e {
+        covecto_core::Error::InvalidOption {
+            option,
+            value,
+            expected,
+        } => anyhow::anyhow!(
+            "invalid value '{value}' for {}: expected {expected}",
+            flag(option)
+        ),
+        covecto_core::Error::UnknownName { what, name, valid } if what != "option" => {
+            anyhow::anyhow!(
+                "unknown {what} '{name}' for {}. Valid: {}",
+                flag(what),
+                valid.join(", ")
+            )
         }
-
-        Ok(config)
+        covecto_core::Error::DuplicateOption(option) => {
+            anyhow::anyhow!("{} was given more than once", flag(option))
+        }
+        other => anyhow::anyhow!(other),
     }
 }
 
@@ -754,30 +682,52 @@ fn cmd_vectorize(input: &Path, opts: &VectorizeOpts) -> anyhow::Result<()> {
 }
 
 fn from_args(args: VectorizeArgs) -> VectorizeOpts {
+    // Only flags the user typed become Explicit options; defaults belong to
+    // covecto-core, so a Profile can still choose the Engine.
+    let mut options: Vec<(&'static str, String)> = Vec::new();
+    let mut push = |name: &'static str, value: Option<String>| {
+        if let Some(v) = value {
+            options.push((name, v));
+        }
+    };
+    let s = |v: Option<i32>| v.map(|v| v.to_string());
+    let u = |v: Option<usize>| v.map(|v| v.to_string());
+    push("engine", args.engine);
+    push("preset", args.preset);
+    push("profile", args.profile);
+    push("color_precision", s(args.color_precision));
+    push("filter_speckle", u(args.filter_speckle));
+    push("corner_threshold", s(args.corner_threshold));
+    push("splice_threshold", s(args.splice_threshold));
+    push("color_mode", args.color_mode);
+    push("hierarchical", args.hierarchical);
+    push("path_simplify", args.path_simplify);
+    push("layer_difference", s(args.layer_difference));
+    push(
+        "length_threshold",
+        args.length_threshold.map(|v| v.to_string()),
+    );
+    push("max_iterations", u(args.max_iterations));
+    push("path_precision", args.path_precision.map(|v| v.to_string()));
+    push("spline_max_mp", args.spline_max_mp.map(|v| v.to_string()));
+    push(
+        "optimize",
+        if args.no_optimize {
+            Some("false".into())
+        } else {
+            args.optimize.map(|v| v.to_string())
+        },
+    );
+    push("optimize_preset", args.optimize_preset);
+    push("multipass", args.multipass.then(|| "true".into()));
+    push("multipass_iterations", u(args.multipass_iterations));
+
     VectorizeOpts {
         output: args.output,
         output_dir: args.output_dir,
         output_template: args.output_template,
         format: args.format,
-        engine: args.engine,
-        preset: args.preset,
-        profile: args.profile,
-        color_precision: args.color_precision,
-        filter_speckle: args.filter_speckle,
-        corner_threshold: args.corner_threshold,
-        splice_threshold: args.splice_threshold,
-        color_mode: args.color_mode,
-        hierarchical: args.hierarchical,
-        path_simplify: args.path_simplify,
-        layer_difference: args.layer_difference,
-        length_threshold: args.length_threshold,
-        max_iterations: args.max_iterations,
-        path_precision: args.path_precision,
-        spline_max_mp: args.spline_max_mp,
-        optimize: args.optimize && !args.no_optimize,
-        optimize_preset: args.optimize_preset,
-        multipass: args.multipass,
-        multipass_iterations: args.multipass_iterations,
+        options,
         recursive: args.recursive,
         json: args.json || args.json_pretty,
         json_pretty: args.json_pretty,
@@ -847,7 +797,7 @@ mod tests {
 
     fn optimize_of(args: &[&str]) -> bool {
         match parse(args).unwrap().command {
-            Commands::Vectorize(a) => from_args(*a).optimize,
+            Commands::Vectorize(a) => from_args(*a).to_config().unwrap().optimize,
             Commands::Serve { .. } => unreachable!(),
         }
     }
@@ -889,6 +839,58 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    fn config_of(args: &[&str]) -> anyhow::Result<VectorizeConfig> {
+        match parse(args).unwrap().command {
+            Commands::Vectorize(a) => from_args(*a).to_config(),
+            Commands::Serve { .. } => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn only_typed_flags_are_explicit_options() {
+        // No flag typed: nothing is explicit, core defaults apply.
+        let c = config_of(&["covecto", "in.png"]).unwrap();
+        assert_eq!(c.engine, covecto_core::Engine::Auto);
+        // An untyped --engine must not count as explicit "auto", so the
+        // Profile can choose the Engine; a typed flag beats the Profile.
+        let c = config_of(&[
+            "covecto",
+            "in.png",
+            "--profile",
+            "icon",
+            "--corner-threshold",
+            "120",
+        ])
+        .unwrap();
+        assert_eq!(c.engine, covecto_core::Engine::Spline);
+        assert_eq!(c.corner_threshold, Some(120));
+        let c = config_of(&[
+            "covecto",
+            "in.png",
+            "--engine",
+            "pixel-exact",
+            "--profile",
+            "icon",
+        ])
+        .unwrap();
+        assert_eq!(c.engine, covecto_core::Engine::PixelExact);
+    }
+
+    #[test]
+    fn option_errors_use_flag_spelling() {
+        let e = config_of(&["covecto", "in.png", "--color-mode", "purple"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("--color-mode") && e.contains("color, binary"),
+            "{e}"
+        );
+        let e = config_of(&["covecto", "in.png", "--profile", "icn"])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("--profile") && e.contains("icon, logo"), "{e}");
     }
 
     #[test]

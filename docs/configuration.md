@@ -62,15 +62,31 @@ covecto photo.jpg --hierarchical stacked --layer-difference 5 -o out.svg
 covecto logo.png --hierarchical cutout --layer-difference 10 -o out.svg
 ```
 
-## Presets vs Individual Params
+## Presets, Profiles and Explicit Options
 
-Presets and profiles override individual params. Order of precedence:
+Options are applied in layers, lowest first. Each layer can change anything
+the layers below it set:
 
-1. Individual CLI flags (highest)
-2. `--preset` / `--profile`
-3. Defaults (lowest)
+1. Defaults
+2. `--preset` (vtracer starting point for Spline parameters; never chooses the engine)
+3. `--profile` (covecto bundle for a kind of image; may choose the engine)
+4. Flags you type yourself (always win)
+
+The order you type the flags in does not matter.
 
 ```bash
-# Profile sets engine + multiple params, --corner-threshold overrides
+# Profile sets engine + multiple params; --corner-threshold 120 wins over the profile's 80
 covecto input.png --profile icon --corner-threshold 120 -o out.svg
+
+# An explicit engine wins over the profile's choice of spline
+covecto input.png --profile icon --engine pixel-exact -o out.svg
+
+# Preset as a starting point, with one parameter changed
+covecto photo.jpg --engine spline --preset poster --filter-speckle 8 -o out.svg
 ```
+
+Unknown names, invalid values and repeated options are errors that name the
+option; nothing is silently ignored. The same rules apply to the API's form
+fields and to library users of `covecto_core::options::resolve`. See
+[`GLOSSARY.md`](https://github.com/codecoradev/covecto/blob/develop/GLOSSARY.md)
+and [ADR 0001](https://github.com/codecoradev/covecto/blob/develop/docs/adr/0001-option-precedence-and-strictness.md).

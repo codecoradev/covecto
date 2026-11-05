@@ -35,6 +35,27 @@ pub enum Error {
 
     #[error("Conversion error: {0}")]
     Conversion(String),
+
+    /// An Option's value does not parse.
+    #[error("Invalid value '{value}' for option '{option}': expected {expected}")]
+    InvalidOption {
+        option: &'static str,
+        value: String,
+        expected: String,
+    },
+
+    /// An unknown Option, Profile or Preset name.
+    #[error("Unknown {what} '{name}'. Valid: {}", valid.join(", "))]
+    UnknownName {
+        /// `"option"`, `"profile"` or `"preset"`.
+        what: &'static str,
+        name: String,
+        valid: Vec<&'static str>,
+    },
+
+    /// The same Option was supplied more than once.
+    #[error("Option '{0}' was supplied more than once")]
+    DuplicateOption(&'static str),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

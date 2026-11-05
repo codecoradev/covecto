@@ -55,10 +55,10 @@ Vectorize an image.
 | `file` | binary | ✅ | Image file (PNG, JPEG, WebP, BMP, GIF, TIFF) |
 | `engine` | string | — | `auto`, `spline`, `pixel-exact` (default: `auto`) |
 | `format` | string | — | `svg`, `pdf`, `eps` (default: `svg`) |
-| `preset` | string | — | vtracer preset: `bw`, `poster`, `photo` |
-| `profile` | string | — | Profile: `icon`, `logo`, `photo`, `lineart` |
+| `preset` | string | — | Preset (vtracer starting point for Spline parameters): `bw`, `poster`, `photo` |
+| `profile` | string | — | Profile (may also choose the engine): `icon`, `logo`, `photo`, `lineart` |
 | `optimize` | boolean | — | Run SVG optimization (default: `true`) |
-| `optimize_preset` | string | — | `default`, `safe`, `none` |
+| `optimize_preset` | string | — | Optimization level: `default`, `safe`, `none` |
 | `multipass` | boolean | — | Multiple optimization passes |
 | `color_precision` | int | — | Color quantization precision (1–32) |
 | `filter_speckle` | int | — | Speckle noise threshold |
@@ -72,6 +72,10 @@ Vectorize an image.
 | `max_iterations` | int | — | Max quantization iterations |
 | `path_precision` | int | — | Coordinate decimal places |
 | `spline_max_mp` | float | — | Spline input budget in megapixels; can only lower the server's `COVECTO_SPLINE_MAX_MP` |
+
+Fields are applied as defaults < `preset` < `profile` < fields you send, in any
+order. An unknown field, an invalid value, an unknown profile/preset or a field
+sent twice returns `400` with an error naming the field.
 
 **Response** `200` (format=svg)
 
@@ -130,7 +134,7 @@ Optimize an existing SVG.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `file` | binary | ✅ | SVG file to optimize |
-| `preset` | string | — | `default`, `safe`, `none` (default: `default`) |
+| `preset` | string | — | Optimization level: `default`, `safe`, `none` (default: `default`). Invalid values and unknown fields return `400` |
 | `multipass` | boolean | — | Multiple passes (default: `false`) |
 | `multipass_iterations` | int | — | Pass count (default: `10`, capped at `16`) |
 

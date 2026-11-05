@@ -11,8 +11,8 @@ mod engine;
 mod error;
 mod export;
 mod optimize;
+pub mod options;
 
-pub use config::apply_profile;
 pub use config::{
     ColorMode, DEFAULT_SPLINE_MAX_MEGAPIXELS, Engine, HierarchicalMode, OptimizeConfig,
     OptimizePreset, PathSimplifyMode, SplinePreset, VectorizeConfig, VectorizeRequest,
@@ -393,7 +393,7 @@ mod tests {
                 c.hierarchical = Some(HierarchicalMode::Cutout)
             }),
             ("speckle", |c| c.filter_speckle = Some(8)),
-            ("poster", |c| c.spline_preset = Some(SplinePreset::Poster)),
+            ("poster", |c| options::apply_preset(c, SplinePreset::Poster)),
             ("opt-safe", |c| {
                 c.optimize_config.preset = OptimizePreset::Safe
             }),

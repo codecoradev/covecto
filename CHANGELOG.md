@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (Options, ADR 0001)
+- **Breaking:** Options are resolved in one place, `covecto_core::options::resolve`, for the CLI, the API and library users. Precedence is defaults < Preset < Profile < Explicit options, in any order, as `docs/configuration.md` always said: `--profile icon --corner-threshold 120` now gives 120 (was 80), and `--engine pixel-exact --profile icon` runs PixelExact (the profile used to overwrite it)
+- **Breaking:** a Preset is a starting point: `--preset poster --filter-speckle 8` keeps 8 (individual parameters used to be discarded). `VectorizeConfig::spline_preset` is removed; `apply_profile` is no longer public
+- **Breaking (API):** unknown fields, invalid values, unknown profiles/presets and repeated fields return `400` naming the field (they were silently ignored). `/v1/optimize` rejects invalid `preset`/`multipass`/`multipass_iterations` values and unknown fields too
+- CLI: invalid option values and unknown profiles/presets are reported with the flag name; no flag has a hidden default that counts as explicit
+
+### Fixed (Options)
+- `--path-simplify` / `path_simplify` was never passed to the Spline engine and had no effect
+
+### Added (Options)
+- `covecto_core::options` (`resolve`, `OPTIONS` catalog), `GLOSSARY.md`, `docs/adr/0001-option-precedence-and-strictness.md`
+
 ### Fixed
 - API: undecodable uploads now return `415` (unsupported format), `400` (corrupt image) or `413` (over the decoder's memory limits) instead of `500` (#60)
 - API: the job queue is bounded: beyond `COVECTO_MAX_CONCURRENCY + COVECTO_MAX_QUEUE` admitted requests, or after `COVECTO_QUEUE_TIMEOUT_SECS` waiting, requests get `503` with `Retry-After`, and a rejected request's upload is never read. Reading the upload is bounded by `COVECTO_UPLOAD_TIMEOUT_SECS` (default 60, `408`), so one slow client holds a place for a bounded time; use proxy-level connection limits against many slow clients (#60)
