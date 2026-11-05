@@ -236,9 +236,28 @@ fn apply_output_template(template: &str, stem: &str, ext: &str) -> String {
     template.replace("{stem}", stem).replace("{ext}", ext)
 }
 
+/// A unique temporary path in the same directory as `path` (same filesystem,
+/// so the final rename is atomic).
+fn temp_sibling(path: &Path) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let name = path
+        .file_name()
+        .map_or_else(|| "output".into(), |n| n.to_string_lossy().into_owned());
+    path.with_file_name(format!(
+        ".{name}.covecto-tmp-{}-{nanos}",
+        std::process::id()
+    ))
+}
+
 /// Vectorize one file into `output` (or next to the input) in `format`.
-/// Returns the render result and the output path. On failure no partial
-/// output file is left behind.
+/// Returns the render result and the output path.
+///
+/// The output is written to a temporary file in the same directory and
+/// renamed over `output` only on success, so a failure never leaves a
+/// partial file and never touches a file that already exists there (which
+/// may even be the input image).
 fn vectorize_single_raw(
     input: &Path,
     output: Option<&Path>,
@@ -265,17 +284,23 @@ fn vectorize_single_raw(
     }
 
     // core picks the strategy per format (SVG streams; PDF/EPS convert in
-    // memory first).
+    // memory first). Write next to the target, then rename into place.
+    let tmp_path = temp_sibling(&out_path);
+    let mut writer = std::io::BufWriter::new(std::fs::File::create(&tmp_path)?);
     let rendered = (|| -> anyhow::Result<RenderResult> {
-        let mut writer = std::io::BufWriter::new(std::fs::File::create(&out_path)?);
         let result = render_to(&mut writer, &req, *format)?;
         writer.flush()?;
         Ok(result)
     })();
-    let result = match rendered {
+    drop(writer);
+    let result = match rendered.and_then(|r| {
+        std::fs::rename(&tmp_path, &out_path)?;
+        Ok(r)
+    }) {
         Ok(result) => result,
         Err(e) => {
-            let _ = std::fs::remove_file(&out_path);
+            // Only our own temporary file is removed; `out_path` is untouched.
+            let _ = std::fs::remove_file(&tmp_path);
             return Err(e);
         }
     };
@@ -1068,22 +1093,68 @@ mod tests {
         }
     }
 
+    fn leftovers(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("covecto-tmp"))
+            .collect()
+    }
+
     #[test]
-    fn failed_render_leaves_no_partial_file() {
-        let tmp = TempDir::new("partial");
-        let input = tmp.0.join("broken.png");
-        std::fs::write(&input, b"not a png").unwrap();
-        let out = tmp.0.join("o.svg");
+    fn existing_output_survives_a_failed_write() {
+        // The render succeeds but moving it into place fails (the target is
+        // a directory): the target must be untouched and no temp file left.
+        let tmp = TempDir::new("survive");
+        let input = fixture("icon-32x32.png");
         let config = config_of(&["covecto", "x.png"]).unwrap();
-        let err = vectorize_single_raw(
+        let target = tmp.0.join("taken.pdf");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("keep.txt"), b"keep").unwrap();
+        let res = vectorize_single_raw(
+            &input,
+            Some(&target),
+            &config,
+            &OutputFormat::Pdf,
+            ImageLimits::default(),
+        );
+        assert!(res.is_err());
+        assert_eq!(std::fs::read(target.join("keep.txt")).unwrap(), b"keep");
+        assert!(leftovers(&tmp.0).is_empty(), "{:?}", leftovers(&tmp.0));
+
+        // An unreadable input never touches an existing output file.
+        let existing = tmp.0.join("o.svg");
+        std::fs::write(&existing, b"previous").unwrap();
+        let broken = tmp.0.join("broken.png");
+        std::fs::write(&broken, b"not a png").unwrap();
+        let res = vectorize_single_raw(
+            &broken,
+            Some(&existing),
+            &config,
+            &OutputFormat::Svg,
+            ImageLimits::default(),
+        );
+        assert!(res.is_err());
+        assert_eq!(std::fs::read(&existing).unwrap(), b"previous");
+    }
+
+    #[test]
+    fn successful_write_replaces_existing_output() {
+        let tmp = TempDir::new("replace");
+        let input = fixture("icon-32x32.png");
+        let config = config_of(&["covecto", "x.png"]).unwrap();
+        let out = tmp.0.join("o.svg");
+        std::fs::write(&out, b"previous").unwrap();
+        vectorize_single_raw(
             &input,
             Some(&out),
             &config,
             &OutputFormat::Svg,
             ImageLimits::default(),
-        );
-        assert!(err.is_err());
-        assert!(!out.exists());
+        )
+        .unwrap();
+        assert!(std::fs::read(&out).unwrap().starts_with(b"<svg"));
+        assert!(leftovers(&tmp.0).is_empty());
     }
 
     #[test]
