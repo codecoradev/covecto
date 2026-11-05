@@ -10,7 +10,7 @@ title: Using as a Crate
 
 ```toml
 [dependencies]
-covecto-core = "0.1"
+covecto-core = "0.2"
 image = "0.25"
 ```
 
@@ -58,10 +58,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         });
 
-    let file = BufWriter::new(File::create("output.svg")?);
-    let metadata = vectorize_to(file, &request)?;
+    let mut file = BufWriter::new(File::create("output.svg")?);
+    let result = vectorize_to(&mut file, &request)?;
 
-    println!("Wrote {} bytes, {} paths", metadata.svg_byte_size, metadata.path_count);
+    println!("Wrote {} bytes, {} paths", result.metadata.svg_byte_size, result.metadata.path_count);
     Ok(())
 }
 ```
