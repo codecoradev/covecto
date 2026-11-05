@@ -18,7 +18,10 @@ pub use config::{
     SplinePreset, VectorizeConfig, VectorizeRequest,
 };
 pub use engine::{pixel_exact, spline};
-pub use error::{Error, Result, load_image, load_image_from_bytes};
+pub use error::{
+    DEFAULT_MAX_DIMENSION, Error, Result, load_image, load_image_from_bytes,
+    load_image_from_bytes_with_limit,
+};
 pub use export::{OutputFormat, convert_output};
 pub use optimize::optimize_svg;
 
@@ -61,8 +64,11 @@ fn auto_select_engine(img: &RgbaImage) -> Engine {
         return Engine::PixelExact;
     }
 
-    // Count unique colors (sample-based for large images)
-    let unique_colors = count_unique_colors(img);
+    // Count unique colors (sample-based for large images). Once the count
+    // exceeds both thresholds below, the result is Spline regardless.
+    let density_threshold = (total_pixels * 0.005) as usize;
+    let cap = 129usize.max(density_threshold + 1);
+    let unique_colors = count_unique_colors(img, cap);
 
     // Heuristic:
     // - Small images (<= 256x256) with few colors (<= 128) → PixelExact
@@ -79,23 +85,22 @@ fn auto_select_engine(img: &RgbaImage) -> Engine {
     }
 }
 
-/// Count unique RGBA colors in an image.
+/// Count unique RGBA colors in an image, up to `cap`.
 /// For large images, samples up to 65_536 pixels to keep this fast.
-fn count_unique_colors(img: &RgbaImage) -> usize {
+/// Stops early once `cap` distinct colors are seen: past that point the
+/// engine decision no longer depends on the exact count.
+fn count_unique_colors(img: &RgbaImage, cap: usize) -> usize {
     use std::collections::HashSet;
     let raw = img.as_raw();
     let total = raw.len() / 4;
     let step = if total > 65_536 { total / 65_536 } else { 1 };
 
-    let mut colors = HashSet::new();
-    for i in (0..total).step_by(step) {
-        let offset = i * 4;
-        colors.insert([
-            raw[offset],
-            raw[offset + 1],
-            raw[offset + 2],
-            raw[offset + 3],
-        ]);
+    let mut colors: HashSet<u32> = HashSet::with_capacity(cap.min(4096));
+    for px in raw.chunks_exact(4).step_by(step) {
+        colors.insert(u32::from_ne_bytes([px[0], px[1], px[2], px[3]]));
+        if colors.len() >= cap {
+            break;
+        }
     }
     colors.len()
 }
@@ -114,6 +119,27 @@ pub struct StreamResult {
     pub metadata: ResultMetadata,
 }
 
+/// Whether the post-vectorize optimizer should run for this engine.
+///
+/// PixelExact output is already minimal (integer coordinates, no prolog,
+/// comments, metadata or empty groups), so every optimizer pass is a no-op on
+/// it. Skipping it keeps `vectorize_to` truly streaming (#54).
+fn should_optimize(engine: Engine, config: &VectorizeConfig) -> bool {
+    config.optimize && engine != Engine::PixelExact
+}
+
+/// Warn when PixelExact produced pathological output (roughly one path per
+/// few pixels), which typically means a photo was forced through it.
+fn warn_if_pathological(engine: Engine, (w, h): (u32, u32), path_count: usize) {
+    let pixels = w as usize * h as usize;
+    if engine == Engine::PixelExact && pixels >= 65_536 && path_count > pixels / 8 {
+        tracing::warn!(
+            "PixelExact produced {path_count} paths for a {w}x{h} image; \
+             the spline engine is usually far smaller for photo-like input"
+        );
+    }
+}
+
 /// Main vectorization entry point.
 pub fn vectorize(request: &VectorizeRequest) -> Result<VectorizeResult> {
     let engine = match request.config.engine {
@@ -129,7 +155,7 @@ pub fn vectorize(request: &VectorizeRequest) -> Result<VectorizeResult> {
     }?;
 
     // Post-processing: optimization
-    let svg = if request.config.optimize {
+    let svg = if should_optimize(engine, &request.config) {
         optimize_svg(&raw_svg, &request.config.optimize_config)?
     } else {
         raw_svg
@@ -144,13 +170,15 @@ pub fn vectorize(request: &VectorizeRequest) -> Result<VectorizeResult> {
     } else {
         1.0
     };
+    let path_count = count_svg_paths(&svg);
+    warn_if_pathological(engine, (w, h), path_count);
 
     Ok(VectorizeResult {
         engine_used: engine,
         metadata: ResultMetadata {
             input_size: (w, h),
             svg_byte_size,
-            path_count: count_svg_paths(&svg),
+            path_count,
             processing_time_ms: elapsed.as_millis() as u64,
             compression_ratio,
         },
@@ -187,7 +215,7 @@ pub fn vectorize_to<W: std::io::Write>(
     let raw_pixel_bytes = (w as usize * h as usize) * 4;
 
     // Optimization needs the whole SVG, so buffer it and write the result once.
-    let (svg_byte_size, path_count) = if request.config.optimize {
+    let (svg_byte_size, path_count) = if should_optimize(engine, &request.config) {
         let mut buf = Vec::new();
         render(&mut buf, engine, request)?;
         let raw = String::from_utf8(buf).map_err(|e| Error::Optimization(e.to_string()))?;
@@ -198,6 +226,7 @@ pub fn vectorize_to<W: std::io::Write>(
         let m = render(writer, engine, request)?;
         (m.byte_count, m.path_count)
     };
+    warn_if_pathological(engine, (w, h), path_count);
 
     let elapsed = start.elapsed();
     let compression_ratio = if raw_pixel_bytes > 0 {
@@ -395,6 +424,43 @@ mod tests {
                 "{name}: path_count != '<path' in written bytes"
             );
         }
+    }
+
+    #[test]
+    fn test_optimizer_is_noop_on_pixel_exact_output() {
+        // Justifies skipping the optimizer for PixelExact (#54): every preset
+        // must leave its output byte-identical, including translucent groups
+        // (#59), and the output must be well-formed XML.
+        let rgba = image::Rgba;
+        let images = [
+            RgbaImage::from_fn(16, 16, |x, y| {
+                let a = [0, 64, 128, 200, 255][((x + y) / 4) as usize % 5];
+                rgba([(x * 16) as u8, (y * 16) as u8, 90, a])
+            }),
+            RgbaImage::from_fn(20, 12, |x, y| {
+                rgba([(x * 13 % 256) as u8, (y * 21 % 256) as u8, 7, 255])
+            }),
+            RgbaImage::from_pixel(1, 1, rgba([1, 2, 3, 4])),
+        ];
+        for img in images {
+            let svg = pixel_exact::vectorize(&img).unwrap();
+            roxmltree::Document::parse(&svg).expect("pixel-exact SVG is well-formed");
+            for preset in [OptimizePreset::Default, OptimizePreset::Safe] {
+                let config = OptimizeConfig {
+                    preset,
+                    multipass: true,
+                    multipass_iterations: 3,
+                };
+                assert_eq!(optimize_svg(&svg, &config).unwrap(), svg, "{preset:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_count_unique_colors_cap() {
+        let img = RgbaImage::from_fn(64, 64, |x, y| image::Rgba([x as u8, y as u8, 0, 255]));
+        assert_eq!(count_unique_colors(&img, usize::MAX), 4096);
+        assert_eq!(count_unique_colors(&img, 100), 100);
     }
 
     #[test]

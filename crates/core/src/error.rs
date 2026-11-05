@@ -56,3 +56,80 @@ pub fn load_image_from_bytes(data: &[u8], format_hint: Option<&str>) -> Result<i
     };
     Ok(img.into_rgba8())
 }
+
+/// Default per-side limit used by [`load_image_from_bytes_with_limit`] callers
+/// that have no explicit configuration (8192 × 8192 ≈ 67 MP, 256 MiB RGBA).
+pub const DEFAULT_MAX_DIMENSION: u32 = 8192;
+
+/// Like [`load_image_from_bytes`], but rejects images whose width or height
+/// exceeds `max_dimension` **before** decoding the pixel data. A small, highly
+/// compressible upload therefore cannot expand into a huge allocation.
+pub fn load_image_from_bytes_with_limit(
+    data: &[u8],
+    format_hint: Option<&str>,
+    max_dimension: u32,
+) -> Result<image::RgbaImage> {
+    let reader = match format_hint {
+        Some(fmt) => {
+            let format = image::ImageFormat::from_extension(fmt)
+                .ok_or_else(|| Error::UnsupportedFormat(fmt.to_string()))?;
+            image::ImageReader::with_format(std::io::Cursor::new(data), format)
+        }
+        None => image::ImageReader::new(std::io::Cursor::new(data)).with_guessed_format()?,
+    };
+    let format = reader.format();
+    let (width, height) = reader.into_dimensions()?;
+    if width > max_dimension || height > max_dimension {
+        return Err(Error::ImageTooLarge {
+            width,
+            height,
+            max_w: max_dimension,
+            max_h: max_dimension,
+        });
+    }
+
+    let img = match format {
+        Some(format) => image::load_from_memory_with_format(data, format)?,
+        None => image::load_from_memory(data)?,
+    };
+    Ok(img.into_rgba8())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(w, h, image::Rgba([1, 2, 3, 255]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn limit_rejects_before_decode() {
+        let data = png(300, 20);
+        let err = load_image_from_bytes_with_limit(&data, None, 256).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::ImageTooLarge {
+                width: 300,
+                height: 20,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn limit_accepts_within_bounds() {
+        let data = png(256, 256);
+        let img = load_image_from_bytes_with_limit(&data, Some("png"), 256).unwrap();
+        assert_eq!(img.dimensions(), (256, 256));
+    }
+
+    #[test]
+    fn limit_reports_garbage_as_decode_error() {
+        let err = load_image_from_bytes_with_limit(b"not an image", None, 256).unwrap_err();
+        assert!(matches!(err, Error::ImageDecode(_)), "{err:?}");
+    }
+}

@@ -100,6 +100,15 @@ Returns raw binary with `Content-Type: application/pdf` or `application/postscri
 }
 ```
 
+**Error** `413`: image width or height exceeds `COVECTO_MAX_DIMENSION`
+(checked from the image header, before decoding).
+
+```json
+{
+  "error": "Image too large: 10000x200 exceeds maximum 8192x8192"
+}
+```
+
 ---
 
 ## `POST /v1/optimize`
@@ -127,6 +136,19 @@ Optimize an existing SVG.
 ```
 
 ---
+
+## Resource Limits
+
+Vectorization runs on a blocking thread pool, so health checks and uploads stay
+responsive while heavy jobs run. Jobs beyond the concurrency limit wait for a
+free slot (they are queued, not rejected).
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `COVECTO_MAX_CONCURRENCY` | CPU count | Max vectorize/optimize jobs running at once |
+| `COVECTO_MAX_DIMENSION` | `8192` | Max image width or height (px); larger uploads get `413` |
+
+The request body limit is 50 MB.
 
 ## OpenAPI Spec
 

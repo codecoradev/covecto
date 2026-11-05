@@ -107,6 +107,15 @@ let result = vectorize(&request).unwrap();
 println!("{} paths in {}ms", result.metadata.path_count, result.metadata.processing_time_ms);
 ```
 
+## Benchmarks
+
+```bash
+cargo bench -p covecto-core
+```
+
+Criterion benchmarks for both engines (optimize on/off, streaming) and the SVG
+optimizer, on deterministic generated inputs. Reports land in `target/criterion/`.
+
 ## License
 
 MIT

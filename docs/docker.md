@@ -23,6 +23,9 @@ services:
       - "3000:3000"
     environment:
       - RUST_LOG=info
+      # Optional resource limits (see API reference)
+      # - COVECTO_MAX_CONCURRENCY=2
+      # - COVECTO_MAX_DIMENSION=8192
     restart: unless-stopped
 ```
 

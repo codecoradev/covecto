@@ -1,3 +1,4 @@
+use axum::body::Bytes;
 use axum::{
     extract::{Multipart, State},
     http::StatusCode,
@@ -5,7 +6,7 @@ use axum::{
 };
 use covecto_core::{
     Engine, OptimizeConfig, OptimizePreset, OutputFormat, VectorizeConfig, VectorizeRequest,
-    convert_output, load_image_from_bytes, optimize_svg, vectorize as core_vectorize,
+    convert_output, load_image_from_bytes_with_limit, optimize_svg, vectorize as core_vectorize,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -93,13 +94,12 @@ pub async fn vectorize_handler(
         path_precision: None,
         color_mode: None,
     };
-    let mut image_data: Option<Vec<u8>> = None;
+    let mut image_data: Option<Bytes> = None;
 
     while let Some(field) = multipart.next_field().await.map_err(AppError::Multipart)? {
         let name = field.name().unwrap_or("").to_string();
         if name == "file" || name.is_empty() {
-            let bytes = field.bytes().await.map_err(AppError::Multipart)?;
-            image_data = Some(bytes.to_vec());
+            image_data = Some(field.bytes().await.map_err(AppError::Multipart)?);
         } else {
             let value = field.text().await.map_err(AppError::Multipart)?;
             match name.as_str() {
@@ -128,7 +128,6 @@ pub async fn vectorize_handler(
     }
 
     let data = image_data.ok_or(AppError::BadRequest("No file provided".into()))?;
-    let img = load_image_from_bytes(&data, None).map_err(AppError::Core)?;
 
     let engine = params
         .engine
@@ -194,8 +193,31 @@ pub async fn vectorize_handler(
         covecto_core::apply_profile(profile, &mut config);
     }
 
-    let req = VectorizeRequest::new(img).with_config(config);
-    let result = core_vectorize(&req).map_err(AppError::Core)?;
+    // Validate the output format before doing any heavy work.
+    let output_format: OutputFormat = params
+        .format
+        .as_deref()
+        .unwrap_or("svg")
+        .parse::<OutputFormat>()
+        .map_err(|e: covecto_core::Error| AppError::BadRequest(e.to_string()))?;
+
+    // Decode, vectorize and convert off the async runtime (#55).
+    let max_dimension = state.limits().max_dimension;
+    let (result, converted) = state
+        .run_job(move || -> covecto_core::Result<_> {
+            let img = load_image_from_bytes_with_limit(&data, None, max_dimension)?;
+            drop(data);
+            let req = VectorizeRequest::new(img).with_config(config);
+            let result = core_vectorize(&req)?;
+            let converted = if output_format == OutputFormat::Svg {
+                None
+            } else {
+                Some(convert_output(&result.svg, output_format)?)
+            };
+            Ok((result, converted))
+        })
+        .await
+        .map_err(AppError::Core)?;
 
     state.record_request(result.metadata.processing_time_ms);
 
@@ -208,16 +230,7 @@ pub async fn vectorize_handler(
     );
 
     // Non-SVG formats: return raw bytes with content-type header
-    let output_format: OutputFormat = params
-        .format
-        .as_deref()
-        .unwrap_or("svg")
-        .parse::<OutputFormat>()
-        .map_err(|e: covecto_core::Error| AppError::BadRequest(e.to_string()))?;
-
-    if output_format != OutputFormat::Svg {
-        let (bytes, content_type) =
-            convert_output(&result.svg, output_format).map_err(AppError::Core)?;
+    if let Some((bytes, content_type)) = converted {
         return Ok(([("content-type", content_type.as_str())], bytes).into_response());
     }
 
@@ -241,7 +254,7 @@ pub async fn optimize_handler(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> Result<Json<OptimizeResponse>, AppError> {
-    let mut svg_data: Option<Vec<u8>> = None;
+    let mut svg_data: Option<Bytes> = None;
     let mut preset = "default".to_string();
     let mut multipass = false;
     let mut multipass_iterations = 10usize;
@@ -249,8 +262,7 @@ pub async fn optimize_handler(
     while let Some(field) = multipart.next_field().await.map_err(AppError::Multipart)? {
         let name = field.name().unwrap_or("").to_string();
         if name == "file" || name.is_empty() {
-            let bytes = field.bytes().await.map_err(AppError::Multipart)?;
-            svg_data = Some(bytes.to_vec());
+            svg_data = Some(field.bytes().await.map_err(AppError::Multipart)?);
         } else {
             let value = field.text().await.map_err(AppError::Multipart)?;
             match name.as_str() {
@@ -263,8 +275,8 @@ pub async fn optimize_handler(
     }
 
     let data = svg_data.ok_or(AppError::BadRequest("No file provided".into()))?;
-    let svg_str =
-        String::from_utf8(data).map_err(|e| AppError::BadRequest(format!("Invalid UTF-8: {e}")))?;
+    let svg_str = String::from_utf8(data.into())
+        .map_err(|e| AppError::BadRequest(format!("Invalid UTF-8: {e}")))?;
 
     let original_size = svg_str.len();
     let opt_preset = match preset.as_str() {
@@ -279,7 +291,10 @@ pub async fn optimize_handler(
         multipass_iterations,
     };
 
-    let optimized = optimize_svg(&svg_str, &config).map_err(AppError::Core)?;
+    let optimized = state
+        .run_job(move || optimize_svg(&svg_str, &config))
+        .await
+        .map_err(AppError::Core)?;
     let optimized_size = optimized.len();
     let reduction_pct = if original_size > 0 {
         (1.0 - optimized_size as f64 / original_size as f64) * 100.0
@@ -307,6 +322,9 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            AppError::Core(e @ covecto_core::Error::ImageTooLarge { .. }) => {
+                (StatusCode::PAYLOAD_TOO_LARGE, e.to_string())
+            }
             AppError::Core(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             AppError::Multipart(e) => (StatusCode::BAD_REQUEST, e.to_string()),
         };

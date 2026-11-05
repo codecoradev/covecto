@@ -181,6 +181,12 @@ paths:
               description: PDF output (when format=pdf)
             application/postscript:
               description: EPS output (when format=eps)
+        '413':
+          description: Image width or height exceeds COVECTO_MAX_DIMENSION (checked before decoding)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '400':
           description: Bad request (missing file, invalid params)
           content:

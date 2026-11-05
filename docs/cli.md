@@ -65,10 +65,14 @@ covecto vectorize [OPTIONS] <INPUT>
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--optimize` | Run SVG optimization | `false` |
+| `--optimize[=BOOL]` | Run SVG optimization (`--optimize=false` to disable) | `true` |
+| `--no-optimize` | Disable SVG optimization | — |
 | `--optimize-preset <P>` | `default`, `safe`, `none` | `default` |
 | `--multipass` | Multiple optimization passes | `false` |
 | `--multipass-iterations <N>` | Pass count (1+) | `10` |
+
+The optimizer is skipped for PixelExact output: it is already minimal, so
+streaming to disk stays fully incremental.
 
 ### Batch & UX
 

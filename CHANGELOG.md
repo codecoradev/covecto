@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- SVG optimizer deleted non-empty `<g>`/`<defs>` groups up to the first child's `/>`: translucent PixelExact output lost its opacity group and first path and became malformed XML under the default config (#59)
+- `remove_comments` dropped the rest of the document after an unclosed `<!--`; it is now kept as-is (#59)
+- `<title>`/`<desc>`/`<metadata>` removal no longer matches tags that merely start with those names (#59)
+- CLI `--optimize` could not be turned off; added `--optimize=false` and `--no-optimize` (#58)
+- CLI: `vectorize` is now the default subcommand, so the documented `covecto input.png -o out.svg` works (#58)
+
+### Changed
+- Optimizer is skipped for PixelExact output (already minimal; byte-identical result), restoring true streaming in `vectorize_to` (#54)
+- Optimizer passes no longer copy the document when they have nothing to change (#54)
+- API: vectorize/optimize run on the blocking pool behind a concurrency limit (`COVECTO_MAX_CONCURRENCY`, default CPU count); uploads larger than `COVECTO_MAX_DIMENSION` (default 8192 px per side) are rejected with `413` before decoding (#55)
+- Fewer copies: spline input is one memcpy, uploads are not copied, PixelExact uses a bitset visited-set and a reused element buffer; engine auto-selection stops counting colors once the decision is fixed; PixelExact warns on pathological (photo-like) output (#56)
+
+### Added
+- `load_image_from_bytes_with_limit` and `DEFAULT_MAX_DIMENSION` in `covecto-core`; `Limits` and `create_app_state_with_limits` in `covecto-api` (#55)
+- Criterion benchmark harness: `cargo bench -p covecto-core` (#57)
+
 ## [0.1.2] - 2026-10-15
 
 ### Fixed

@@ -37,7 +37,7 @@ pub fn vectorize_to<W: std::io::Write>(writer: &mut W, img: &RgbaImage) -> Resul
         [raw[i], raw[i + 1], raw[i + 2], raw[i + 3]]
     };
 
-    let mut visited = vec![false; (width * height) as usize];
+    let mut visited = BitSet::new(width as usize * height as usize);
 
     // (offset_to_neighbor, (edge_start_corner, edge_end_corner))
     let edges_offsets = [
@@ -57,19 +57,19 @@ pub fn vectorize_to<W: std::io::Write>(writer: &mut W, img: &RgbaImage) -> Resul
     for y in 0..height {
         for x in 0..width {
             let idx = (y * width + x) as usize;
-            if visited[idx] {
+            if visited.get(idx) {
                 continue;
             }
 
             let colors = get_rgba(x, y);
             if colors[3] == 0 {
-                visited[idx] = true;
+                visited.set(idx);
                 continue;
             }
 
             queue.clear();
             queue.push((x as i32, y as i32));
-            visited[idx] = true;
+            visited.set(idx);
 
             current_edges.clear();
 
@@ -85,8 +85,8 @@ pub fn vectorize_to<W: std::io::Write>(writer: &mut W, img: &RgbaImage) -> Resul
                             let (nx_u, ny_u) = (nx as u32, ny as u32);
                             if get_rgba(nx_u, ny_u) == colors {
                                 let n_idx = (ny_u * width + nx_u) as usize;
-                                if !visited[n_idx] {
-                                    visited[n_idx] = true;
+                                if !visited.get(n_idx) {
+                                    visited.set(n_idx);
                                     queue.push((nx, ny));
                                 }
                                 false
@@ -216,22 +216,32 @@ pub fn vectorize_to<W: std::io::Write>(writer: &mut W, img: &RgbaImage) -> Resul
     // SVG header
     writer.write_all(svg_header(width, height).as_bytes())?;
 
-    // Group translucent paths by alpha
-    let mut translucent_by_alpha: BTreeMap<u8, Vec<([u8; 4], String)>> = BTreeMap::new();
+    // Group translucent paths by alpha (borrowing the path data, no copies)
+    let mut translucent_by_alpha: BTreeMap<u8, Vec<([u8; 4], &str)>> = BTreeMap::new();
+
+    // One reusable buffer per element; each element is still emitted with a
+    // single `write_all`, so the `<path` counter never sees a split tag.
+    let mut line: Vec<u8> = Vec::with_capacity(256);
+    let mut write_path = |writer: &mut CountingWriter<'_, W>,
+                          [r, g, b, _]: [u8; 4],
+                          data: &str|
+     -> std::io::Result<()> {
+        line.clear();
+        write!(
+            line,
+            r##"<path fill="#{r:02x}{g:02x}{b:02x}" d="{data}"/>"##
+        )?;
+        writer.write_all(&line)
+    };
 
     for (color, (data, _)) in &paths_by_color {
-        let [r, g, b, a] = *color;
-        if a == 255 {
-            let line = format!(
-                r##"<path fill="#{:02x}{:02x}{:02x}" d="{}"/>"##,
-                r, g, b, data
-            );
-            writer.write_all(line.as_bytes())?;
+        if color[3] == 255 {
+            write_path(&mut writer, *color, data)?;
         } else {
             translucent_by_alpha
-                .entry(a)
+                .entry(color[3])
                 .or_default()
-                .push((*color, data.clone()));
+                .push((*color, data.as_str()));
         }
     }
 
@@ -239,12 +249,8 @@ pub fn vectorize_to<W: std::io::Write>(writer: &mut W, img: &RgbaImage) -> Resul
         let opacity = f32::from(*a) / 255.0;
         let open = format!(r#"<g fill-opacity="{:.3}">"#, opacity);
         writer.write_all(open.as_bytes())?;
-        for ([r, g, b, _], data) in paths {
-            let line = format!(
-                r##"<path fill="#{:02x}{:02x}{:02x}" d="{}"/>"##,
-                r, g, b, data
-            );
-            writer.write_all(line.as_bytes())?;
+        for &(color, data) in paths {
+            write_path(&mut writer, color, data)?;
         }
         writer.write_all(b"</g>")?;
     }
@@ -255,6 +261,29 @@ pub fn vectorize_to<W: std::io::Write>(writer: &mut W, img: &RgbaImage) -> Resul
         byte_count: writer.bytes,
         path_count: writer.paths,
     })
+}
+
+/// Compact visited-set: one bit per pixel (8x smaller than `Vec<bool>`).
+struct BitSet {
+    words: Vec<u64>,
+}
+
+impl BitSet {
+    fn new(len: usize) -> Self {
+        Self {
+            words: vec![0; len.div_ceil(64)],
+        }
+    }
+
+    #[inline]
+    fn get(&self, i: usize) -> bool {
+        self.words[i / 64] & (1 << (i % 64)) != 0
+    }
+
+    #[inline]
+    fn set(&mut self, i: usize) {
+        self.words[i / 64] |= 1 << (i % 64);
+    }
 }
 
 /// Counts bytes and `<path` elements as they are written. Every emitted element

@@ -331,3 +331,53 @@ async fn test_metrics_increment_after_vectorize() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["request_count"], 1);
 }
+
+#[tokio::test]
+async fn test_vectorize_oversized_image_returns_413() {
+    let state = covecto_api::create_app_state_with_limits(covecto_api::Limits {
+        max_concurrency: 1,
+        max_dimension: 16,
+    });
+    let app = covecto_api::app_with_state(state.clone());
+    // 32x32 > 16 per side: rejected from the header, before decoding.
+    let bytes = fixture_bytes("icon-32x32.png");
+    let req = multipart_request("icon-32x32.png", &bytes);
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["error"].as_str().unwrap().contains("too large"));
+    assert_eq!(state.request_count(), 0);
+}
+
+#[tokio::test]
+async fn test_vectorize_translucent_output_is_well_formed() {
+    // Regression (#59): the default optimizer used to delete `<g>` groups of
+    // translucent PixelExact paths, producing malformed SVG.
+    let img = image::RgbaImage::from_fn(4, 2, |x, _| {
+        if x < 2 {
+            image::Rgba([255, 0, 0, 128])
+        } else {
+            image::Rgba([0, 0, 255, 128])
+        }
+    });
+    let mut png = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut png, image::ImageFormat::Png).unwrap();
+    let req = multipart_request("t.png", png.get_ref());
+
+    let resp = app().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let svg = json["svg"].as_str().unwrap();
+    assert!(svg.contains("<g fill-opacity="), "{svg}");
+    assert_eq!(svg.matches("<path").count(), 2, "{svg}");
+    assert_eq!(
+        svg.matches("<g").count(),
+        svg.matches("</g>").count(),
+        "{svg}"
+    );
+}

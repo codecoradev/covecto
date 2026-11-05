@@ -35,17 +35,9 @@ pub fn vectorize_to<W: std::io::Write>(
 
 fn to_color_image(img: &RgbaImage) -> vtracer::ColorImage {
     let (w, h) = (img.width() as usize, img.height() as usize);
-    let raw = img.as_raw();
-    // vtracer ColorImage uses flat Vec<u8> in RGBA order
-    let mut pixels = Vec::with_capacity(w * h * 4);
-    for chunk in raw.chunks(4) {
-        pixels.push(chunk[0]); // r
-        pixels.push(chunk[1]); // g
-        pixels.push(chunk[2]); // b
-        pixels.push(chunk[3]); // a
-    }
+    // vtracer ColorImage uses the same flat RGBA layout: one memcpy.
     vtracer::ColorImage {
-        pixels,
+        pixels: img.as_raw().to_vec(),
         width: w,
         height: h,
     }
