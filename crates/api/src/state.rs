@@ -99,7 +99,10 @@ impl AppState {
     /// Run CPU-bound `work` on the blocking thread pool, at most
     /// `max_concurrency` at a time, so async runtime workers stay free
     /// (health checks, uploads in flight) while jobs run.
-    pub(crate) async fn run_job<T, F>(&self, work: F) -> T
+    ///
+    /// A panic inside `work` is contained and returned as `Err`, so the
+    /// handler can still answer with a 500 instead of dropping the connection.
+    pub(crate) async fn run_job<T, F>(&self, work: F) -> Result<T, tokio::task::JoinError>
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
@@ -116,7 +119,6 @@ impl AppState {
             work()
         })
         .await
-        .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))
     }
 }
 
@@ -143,6 +145,7 @@ mod tests {
             async move {
                 st.run_job(|| std::thread::sleep(Duration::from_millis(400)))
                     .await
+                    .unwrap()
             }
         });
         tokio::task::yield_now().await;
@@ -171,6 +174,7 @@ mod tests {
                         running.fetch_sub(1, Ordering::SeqCst);
                     })
                     .await
+                    .unwrap()
                 })
             })
             .collect();
@@ -178,5 +182,14 @@ mod tests {
             t.await.unwrap();
         }
         assert_eq!(peak.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn panicking_job_is_contained_and_releases_its_slot() {
+        let st = state(1);
+        let res = st.run_job(|| -> u8 { panic!("boom") }).await;
+        assert!(res.unwrap_err().is_panic());
+        // The permit was released: the next job still runs.
+        assert_eq!(st.run_job(|| 7).await.unwrap(), 7);
     }
 }

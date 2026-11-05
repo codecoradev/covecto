@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SVG optimizer deleted non-empty `<g>`/`<defs>` groups up to the first child's `/>`: translucent PixelExact output lost its opacity group and first path and became malformed XML under the default config (#59)
 - `remove_comments` dropped the rest of the document after an unclosed `<!--`; it is now kept as-is (#59)
 - `<title>`/`<desc>`/`<metadata>` removal no longer matches tags that merely start with those names (#59)
+- Path-number shortening no longer rewrites numbers inside `id="..."` (or any attribute ending in `d`); only a standalone `d` attribute is path data
+- API: a panic inside a vectorization job now returns `500` instead of dropping the connection, and frees its concurrency slot
 - CLI `--optimize` could not be turned off; added `--optimize=false` and `--no-optimize` (#58)
 - CLI: `vectorize` is now the default subcommand, so the documented `covecto input.png -o out.svg` works (#58)
 

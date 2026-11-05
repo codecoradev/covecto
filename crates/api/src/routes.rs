@@ -217,6 +217,7 @@ pub async fn vectorize_handler(
             Ok((result, converted))
         })
         .await
+        .map_err(AppError::Job)?
         .map_err(AppError::Core)?;
 
     state.record_request(result.metadata.processing_time_ms);
@@ -294,6 +295,7 @@ pub async fn optimize_handler(
     let optimized = state
         .run_job(move || optimize_svg(&svg_str, &config))
         .await
+        .map_err(AppError::Job)?
         .map_err(AppError::Core)?;
     let optimized_size = optimized.len();
     let reduction_pct = if original_size > 0 {
@@ -316,6 +318,8 @@ pub enum AppError {
     BadRequest(String),
     Core(covecto_core::Error),
     Multipart(axum::extract::multipart::MultipartError),
+    /// The blocking job panicked or was cancelled.
+    Job(tokio::task::JoinError),
 }
 
 impl IntoResponse for AppError {
@@ -327,6 +331,13 @@ impl IntoResponse for AppError {
             }
             AppError::Core(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             AppError::Multipart(e) => (StatusCode::BAD_REQUEST, e.to_string()),
+            AppError::Job(e) => {
+                tracing::error!("vectorization job failed: {e}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal error while processing the image".to_string(),
+                )
+            }
         };
 
         let body = serde_json::json!({ "error": message });

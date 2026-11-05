@@ -238,7 +238,12 @@ fn shorten_path_numbers(s: &str) -> Option<String> {
 
     while i < len {
         // Look for d="..." attribute — only shorten numbers inside path data
-        if i + 3 < len && bytes[i] == b'd' && bytes[i + 1] == b'=' && bytes[i + 2] == b'"' {
+        if i + 3 < len
+            && bytes[i] == b'd'
+            && bytes[i + 1] == b'='
+            && bytes[i + 2] == b'"'
+            && (i == 0 || bytes[i - 1].is_ascii_whitespace())
+        {
             // Copy d=" literally
             result.push_str("d=\"");
             i += 3;
@@ -313,15 +318,19 @@ fn shorten_path_numbers(s: &str) -> Option<String> {
 }
 
 /// Whether any `d="..."` attribute value contains a decimal point.
+/// Like [`shorten_path_numbers`], only a standalone `d` attribute counts
+/// (start of input or preceded by whitespace), not e.g. `id="..."`.
 fn path_data_has_dot(s: &str) -> bool {
-    let mut rest = s;
-    while let Some(i) = rest.find("d=\"") {
-        let value = &rest[i + 3..];
+    let mut from = 0;
+    while let Some(rel) = s[from..].find("d=\"") {
+        let i = from + rel;
+        let value = &s[i + 3..];
         let end = value.find('"').unwrap_or(value.len());
-        if value[..end].contains('.') {
+        let standalone = i == 0 || s.as_bytes()[i - 1].is_ascii_whitespace();
+        if standalone && value[..end].contains('.') {
             return true;
         }
-        rest = &value[end..];
+        from = i + 3 + end;
     }
     false
 }
@@ -419,6 +428,17 @@ mod tests {
             result.contains(r#"d="M1 2""#),
             "Path numbers should be shortened: {result}"
         );
+    }
+
+    #[test]
+    fn test_shorten_numbers_ignores_id_attributes() {
+        let input = r#"<path id="v1.0" data-id="2.50" d="M1.500 2.0"/>"#;
+        assert_eq!(
+            shorten_path_numbers(input).unwrap(),
+            r#"<path id="v1.0" data-id="2.50" d="M1.5 2"/>"#
+        );
+        assert!(!path_data_has_dot(r#"<path id="v1.0" d="M1,2"/>"#));
+        assert_eq!(shorten_path_numbers(r#"<path id="v1.0" d="M1,2"/>"#), None);
     }
 
     #[test]
