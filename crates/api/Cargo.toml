@@ -27,3 +27,4 @@ anyhow = { workspace = true }
 [dev-dependencies]
 http-body-util = { workspace = true }
 image = { workspace = true }
+futures-util = { version = "0.3", default-features = false }

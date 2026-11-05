@@ -101,8 +101,17 @@ Returns raw binary with `Content-Type: application/pdf` or `application/postscri
 }
 ```
 
+**Error** `415`: the upload is not in a supported image format.
+**Error** `400`: the image format is recognized but the data is corrupt or truncated.
+
+**Error** `408`: the upload was not received within `COVECTO_UPLOAD_TIMEOUT_SECS`.
+
+**Error** `503`: the server is saturated (job queue full, or no job slot freed
+within `COVECTO_QUEUE_TIMEOUT_SECS`). The response has `Retry-After: 1`; retry later.
+
 **Error** `413`: image width or height exceeds `COVECTO_MAX_DIMENSION`
-(checked from the image header, before decoding).
+(checked from the image header, before decoding), or the image exceeds the
+decoder's memory limits.
 
 ```json
 {
@@ -141,12 +150,25 @@ Optimize an existing SVG.
 ## Resource Limits
 
 Vectorization runs on a blocking thread pool, so health checks and uploads stay
-responsive while heavy jobs run. Jobs beyond the concurrency limit wait for a
-free slot (they are queued, not rejected).
+responsive while heavy jobs run. Jobs beyond the concurrency limit wait in a
+bounded queue. When `COVECTO_MAX_CONCURRENCY + COVECTO_MAX_QUEUE` requests are
+already admitted, a new request gets `503` with `Retry-After` **before its upload
+is read**. A queued request that waits longer than `COVECTO_QUEUE_TIMEOUT_SECS`
+also gets `503`. Because the upload is read while holding a queue place, reading
+it is bounded by `COVECTO_UPLOAD_TIMEOUT_SECS` (`408` when exceeded), so one slow
+client holds a place for a bounded time only. This is a total deadline, not an
+idle timeout: at the 60 s default a near-limit 50 MB upload needs about
+0.85 MB/s. It does not stop a client that opens many slow connections; put
+per-client connection and rate limits in front of the API (reverse proxy) for
+public deployments. This applies to `/v1/vectorize` and
+`/v1/optimize`.
 
 | Env var | Default | Description |
 |---------|---------|-------------|
 | `COVECTO_MAX_CONCURRENCY` | CPU count | Max vectorize/optimize jobs running at once |
+| `COVECTO_MAX_QUEUE` | 4 × concurrency | Max requests waiting for a slot; beyond that `503`. `0` = no waiting |
+| `COVECTO_QUEUE_TIMEOUT_SECS` | `30` | Max wait for a slot before `503` |
+| `COVECTO_UPLOAD_TIMEOUT_SECS` | `60` | Max total time to receive the request body before `408` |
 | `COVECTO_MAX_DIMENSION` | `8192` | Max image width or height (px); larger uploads get `413` |
 | `COVECTO_SPLINE_MAX_MP` | `2` | Spline input budget (megapixels); larger images are downscaled before tracing. Clients may only lower it. `0` = no server cap |
 

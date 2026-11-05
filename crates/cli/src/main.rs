@@ -799,12 +799,23 @@ fn with_default_subcommand(mut args: Vec<std::ffi::OsString>) -> Vec<std::ffi::O
         "--version",
     ];
     if let Some(first) = args.get(1) {
-        let first = first.to_string_lossy();
-        if !PASSTHROUGH.contains(&first.as_ref()) {
+        let first_str = first.to_string_lossy();
+        if !PASSTHROUGH.contains(&first_str.as_ref()) && looks_like_input(first) {
             args.insert(1, "vectorize".into());
         }
     }
     args
+}
+
+/// Whether the first argument is an input (or a vectorize flag) rather than a
+/// mistyped subcommand. A bare word like `serv` that is not an existing path
+/// is left to clap, which reports "unrecognized subcommand" and suggests
+/// `serve`, instead of failing later with "file not found".
+fn looks_like_input(arg: &std::ffi::OsStr) -> bool {
+    let s = arg.to_string_lossy();
+    s.starts_with('-')
+        || std::path::Path::new(arg).exists()
+        || s.contains(['.', '/', '\\', '*', '?', '['])
 }
 
 #[tokio::main]
@@ -888,6 +899,16 @@ mod tests {
         assert!(matches!(cli.command, Commands::Vectorize(_)));
         let cli = parse(&["covecto", "serve", "--port", "8080"]).unwrap();
         assert!(matches!(cli.command, Commands::Serve { port: 8080 }));
+        // Paths and globs without an extension still route to vectorize.
+        let cli = parse(&["covecto", "icons/", "-o", "out/"]).unwrap();
+        assert!(matches!(cli.command, Commands::Vectorize(_)));
+        let cli = parse(&["covecto", "*.png"]).unwrap();
+        assert!(matches!(cli.command, Commands::Vectorize(_)));
+        // #60: a mistyped subcommand is clap's error (with a suggestion),
+        // not a vectorize run on a file named "serv".
+        let err = parse(&["covecto", "serv"]).err().expect("must not parse");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+        assert!(err.to_string().contains("serve"), "{err}");
         assert!(parse(&["covecto", "--version"]).is_err()); // clap's DisplayVersion
     }
 }

@@ -39,6 +39,26 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+impl Error {
+    /// The image exceeds a size or memory limit (ours or the decoder's), as
+    /// opposed to being corrupt.
+    pub fn is_too_large(&self) -> bool {
+        matches!(
+            self,
+            Error::ImageTooLarge { .. } | Error::ImageDecode(image::ImageError::Limits(_))
+        )
+    }
+
+    /// The input is not in an image format covecto can decode (unknown or
+    /// unsupported format), as opposed to a recognized but corrupt image.
+    pub fn is_unsupported_format(&self) -> bool {
+        matches!(
+            self,
+            Error::UnsupportedFormat(_) | Error::ImageDecode(image::ImageError::Unsupported(_))
+        )
+    }
+}
+
 /// Convenience: read and decode an image file.
 pub fn load_image(path: &std::path::Path) -> Result<image::RgbaImage> {
     let img = image::open(path)?;
@@ -137,5 +157,15 @@ mod tests {
     fn limit_reports_garbage_as_decode_error() {
         let err = load_image_from_bytes_with_limit(b"not an image", None, 256).unwrap_err();
         assert!(matches!(err, Error::ImageDecode(_)), "{err:?}");
+        assert!(err.is_unsupported_format(), "{err:?}");
+    }
+
+    #[test]
+    fn truncated_image_is_decode_error_not_unsupported() {
+        let mut data = png(32, 32);
+        data.truncate(data.len() / 2);
+        let err = load_image_from_bytes_with_limit(&data, None, 256).unwrap_err();
+        assert!(matches!(err, Error::ImageDecode(_)), "{err:?}");
+        assert!(!err.is_unsupported_format(), "{err:?}");
     }
 }

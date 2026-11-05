@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- API: undecodable uploads now return `415` (unsupported format), `400` (corrupt image) or `413` (over the decoder's memory limits) instead of `500` (#60)
+- API: the job queue is bounded: beyond `COVECTO_MAX_CONCURRENCY + COVECTO_MAX_QUEUE` admitted requests, or after `COVECTO_QUEUE_TIMEOUT_SECS` waiting, requests get `503` with `Retry-After`, and a rejected request's upload is never read. Reading the upload is bounded by `COVECTO_UPLOAD_TIMEOUT_SECS` (default 60, `408`), so one slow client holds a place for a bounded time; use proxy-level connection limits against many slow clients (#60)
+- Optimizer: removing an element no longer eats the whitespace after it, which may be text (`Hello<title/> world` became `Helloworld`); indentation is still collapsed by the whitespace pass (#60)
+- Optimizer: empty `<g>` and `<defs>` are removed in one pass, so `<defs><g/></defs>` no longer survives as `<defs></defs>` without multipass (#60)
+- CLI: a mistyped subcommand (`covecto serv`) is reported by clap with a suggestion instead of being treated as an input path (#60)
 - SVG optimizer deleted non-empty `<g>`/`<defs>` groups up to the first child's `/>`: translucent PixelExact output lost its opacity group and first path and became malformed XML under the default config (#59)
 - `remove_comments` dropped the rest of the document after an unclosed `<!--`; it is now kept as-is (#59)
 - `<title>`/`<desc>`/`<metadata>` removal no longer matches tags that merely start with those names (#59)

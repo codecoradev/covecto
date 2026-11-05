@@ -1,13 +1,26 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::Duration;
 use tokio::sync::Semaphore;
 
 /// Resource limits for CPU-heavy endpoints.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
     /// Maximum number of vectorize/optimize jobs running at once.
-    /// Further requests wait for a free slot (backpressure, no rejection).
     pub max_concurrency: usize,
+    /// Maximum number of requests waiting for a job slot. Requests beyond
+    /// `max_concurrency + max_queue` are rejected with `503` before their
+    /// upload is read, so a burst cannot pile up buffered bodies.
+    pub max_queue: usize,
+    /// How long a request may wait for a job slot before it gets `503`.
+    pub queue_timeout: Duration,
+    /// How long reading a request body may take in total before `408`. The
+    /// body is read while holding a queue place, so this bounds how long one
+    /// slow client can hold it. It is a total deadline, not an idle timeout
+    /// (a drip-feeding client would never trip an idle timeout), so it also
+    /// sets the slowest link that can upload a near-limit body: 50 MB in 60 s
+    /// needs about 0.85 MB/s.
+    pub upload_timeout: Duration,
     /// Maximum width or height of an uploaded image, checked before decoding.
     pub max_dimension: u32,
     /// Server-side spline input budget in megapixels; larger images are
@@ -18,10 +31,14 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
+        let max_concurrency = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
         Self {
-            max_concurrency: std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4),
+            max_concurrency,
+            max_queue: max_concurrency.saturating_mul(4),
+            queue_timeout: Duration::from_secs(30),
+            upload_timeout: Duration::from_secs(60),
             max_dimension: covecto_core::DEFAULT_MAX_DIMENSION,
             spline_max_megapixels: covecto_core::DEFAULT_SPLINE_MAX_MEGAPIXELS,
         }
@@ -29,12 +46,24 @@ impl Default for Limits {
 }
 
 impl Limits {
-    /// Defaults overridden by `COVECTO_MAX_CONCURRENCY`, `COVECTO_MAX_DIMENSION`
-    /// and `COVECTO_SPLINE_MAX_MP`.
+    /// Defaults overridden by `COVECTO_MAX_CONCURRENCY`, `COVECTO_MAX_QUEUE`,
+    /// `COVECTO_QUEUE_TIMEOUT_SECS`, `COVECTO_UPLOAD_TIMEOUT_SECS`,
+    /// `COVECTO_MAX_DIMENSION` and `COVECTO_SPLINE_MAX_MP`.
     pub fn from_env() -> Self {
         let mut limits = Self::default();
         if let Some(n) = env_parse::<usize>("COVECTO_MAX_CONCURRENCY").filter(|&n| n > 0) {
-            limits.max_concurrency = n;
+            limits.max_concurrency = n.min(MAX_CONCURRENCY);
+            limits.max_queue = limits.max_concurrency.saturating_mul(4);
+        }
+        // 0 is valid: no waiting, only `max_concurrency` requests at a time.
+        if let Some(n) = env_parse::<usize>("COVECTO_MAX_QUEUE") {
+            limits.max_queue = n;
+        }
+        if let Some(secs) = env_parse::<u64>("COVECTO_QUEUE_TIMEOUT_SECS").filter(|&s| s > 0) {
+            limits.queue_timeout = Duration::from_secs(secs);
+        }
+        if let Some(secs) = env_parse::<u64>("COVECTO_UPLOAD_TIMEOUT_SECS").filter(|&s| s > 0) {
+            limits.upload_timeout = Duration::from_secs(secs);
         }
         if let Some(n) = env_parse::<u32>("COVECTO_MAX_DIMENSION").filter(|&n| n > 0) {
             limits.max_dimension = n;
@@ -63,6 +92,9 @@ impl Limits {
     }
 }
 
+/// Upper bound for `max_concurrency` (well below `Semaphore::MAX_PERMITS`).
+const MAX_CONCURRENCY: usize = 1 << 16;
+
 fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
     std::env::var(key).ok()?.trim().parse().ok()
 }
@@ -78,6 +110,32 @@ struct AppStateInner {
     total_processing_ms: AtomicU64,
     limits: Limits,
     jobs: Arc<Semaphore>,
+    /// Requests admitted (waiting for a slot or running).
+    admitted: AtomicUsize,
+}
+
+/// Why a job could not run.
+#[derive(Debug)]
+pub enum JobError {
+    /// The queue is full; the request was rejected before reading its body.
+    Busy,
+    /// No job slot became free within `queue_timeout`.
+    Timeout,
+    /// The job panicked or was cancelled.
+    Failed(tokio::task::JoinError),
+}
+
+/// A place in the job queue. Held from admission until the job finishes,
+/// including after the client disconnects, so the queue bound counts real
+/// work. Dropping it frees the place.
+pub struct Ticket {
+    inner: Arc<AppStateInner>,
+}
+
+impl Drop for Ticket {
+    fn drop(&mut self) {
+        self.inner.admitted.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// State with limits taken from the environment (see [`Limits::from_env`]).
@@ -91,7 +149,10 @@ pub fn create_app_state_with_limits(limits: Limits) -> AppState {
         inner: Arc::new(AppStateInner {
             request_count: AtomicU64::new(0),
             total_processing_ms: AtomicU64::new(0),
-            jobs: Arc::new(Semaphore::new(limits.max_concurrency.max(1))),
+            jobs: Arc::new(Semaphore::new(
+                limits.max_concurrency.clamp(1, MAX_CONCURRENCY),
+            )),
+            admitted: AtomicUsize::new(0),
             limits,
         }),
     }
@@ -122,52 +183,84 @@ impl AppState {
         self.inner.limits
     }
 
+    /// Take a place in the job queue, or `Err(JobError::Busy)` when
+    /// `max_concurrency + max_queue` requests are already admitted. Call this
+    /// before reading the request body.
+    pub fn admit(&self) -> Result<Ticket, JobError> {
+        let limits = &self.inner.limits;
+        let capacity = limits
+            .max_concurrency
+            .clamp(1, MAX_CONCURRENCY)
+            .saturating_add(limits.max_queue);
+        // Increment only when below capacity, so concurrent rejections never
+        // make the count read high and turn away a request that would fit.
+        let admitted = &self.inner.admitted;
+        let mut n = admitted.load(Ordering::Acquire);
+        loop {
+            if n >= capacity {
+                return Err(JobError::Busy);
+            }
+            match admitted.compare_exchange_weak(n, n + 1, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => break,
+                Err(current) => n = current,
+            }
+        }
+        Ok(Ticket {
+            inner: self.inner.clone(),
+        })
+    }
+
     /// Run CPU-bound `work` on the blocking thread pool, at most
     /// `max_concurrency` at a time, so async runtime workers stay free
-    /// (health checks, uploads in flight) while jobs run.
+    /// (health checks, uploads in flight) while jobs run. Waits at most
+    /// `queue_timeout` for a slot.
     ///
     /// A panic inside `work` is contained and returned as `Err`, so the
     /// handler can still answer with a 500 instead of dropping the connection.
-    pub(crate) async fn run_job<T, F>(&self, work: F) -> Result<T, tokio::task::JoinError>
+    pub(crate) async fn run_job<T, F>(&self, ticket: Ticket, work: F) -> Result<T, JobError>
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        let permit = self
-            .inner
-            .jobs
-            .clone()
-            .acquire_owned()
+        let acquire = self.inner.jobs.clone().acquire_owned();
+        let permit = tokio::time::timeout(self.inner.limits.queue_timeout, acquire)
             .await
+            .map_err(|_| JobError::Timeout)?
             .expect("job semaphore is never closed");
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
+            let _ticket = ticket;
             work()
         })
         .await
+        .map_err(JobError::Failed)
+    }
+
+    /// Requests currently admitted (waiting or running).
+    pub fn admitted(&self) -> usize {
+        self.inner.admitted.load(Ordering::Acquire)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     fn state(max_concurrency: usize) -> AppState {
         create_app_state_with_limits(Limits {
             max_concurrency,
             max_dimension: 64,
             spline_max_megapixels: 2.0,
+            ..Limits::default()
         })
     }
 
     #[test]
     fn spline_budget_client_can_only_lower() {
         let limits = Limits {
-            max_concurrency: 1,
-            max_dimension: 64,
             spline_max_megapixels: 2.0,
+            ..Limits::default()
         };
         assert_eq!(limits.spline_budget(None), 2.0);
         assert_eq!(limits.spline_budget(Some(0.5)), 0.5);
@@ -190,7 +283,8 @@ mod tests {
         let job = tokio::spawn({
             let st = st.clone();
             async move {
-                st.run_job(|| std::thread::sleep(Duration::from_millis(400)))
+                let ticket = st.admit().unwrap();
+                st.run_job(ticket, || std::thread::sleep(Duration::from_millis(400)))
                     .await
                     .unwrap()
             }
@@ -214,7 +308,8 @@ mod tests {
             .map(|_| {
                 let (st, running, peak) = (st.clone(), running.clone(), peak.clone());
                 tokio::spawn(async move {
-                    st.run_job(move || {
+                    let ticket = st.admit().unwrap();
+                    st.run_job(ticket, move || {
                         let now = running.fetch_add(1, Ordering::SeqCst) + 1;
                         peak.fetch_max(now, Ordering::SeqCst);
                         std::thread::sleep(Duration::from_millis(50));
@@ -229,14 +324,79 @@ mod tests {
             t.await.unwrap();
         }
         assert_eq!(peak.load(Ordering::SeqCst), 2);
+        assert_eq!(st.admitted(), 0);
     }
 
     #[tokio::test]
     async fn panicking_job_is_contained_and_releases_its_slot() {
         let st = state(1);
-        let res = st.run_job(|| -> u8 { panic!("boom") }).await;
-        assert!(res.unwrap_err().is_panic());
-        // The permit was released: the next job still runs.
-        assert_eq!(st.run_job(|| 7).await.unwrap(), 7);
+        let res = st
+            .run_job(st.admit().unwrap(), || -> u8 { panic!("boom") })
+            .await;
+        assert!(matches!(res, Err(JobError::Failed(e)) if e.is_panic()));
+        // The permit and the queue place were released: the next job runs.
+        assert_eq!(st.admitted(), 0);
+        assert_eq!(st.run_job(st.admit().unwrap(), || 7).await.unwrap(), 7);
+    }
+
+    #[test]
+    fn queue_admission_is_bounded() {
+        // #60: 1 running + 2 waiting allowed; the 4th request is Busy.
+        let st = create_app_state_with_limits(Limits {
+            max_concurrency: 1,
+            max_queue: 2,
+            ..Limits::default()
+        });
+        let tickets: Vec<_> = (0..3).map(|_| st.admit().unwrap()).collect();
+        assert!(matches!(st.admit(), Err(JobError::Busy)));
+        assert_eq!(st.admitted(), 3, "a rejected admit must not leak a place");
+        drop(tickets);
+        assert_eq!(st.admitted(), 0);
+        assert!(st.admit().is_ok());
+    }
+
+    #[test]
+    fn huge_limits_do_not_overflow() {
+        let st = create_app_state_with_limits(Limits {
+            max_concurrency: usize::MAX,
+            max_queue: usize::MAX,
+            ..Limits::default()
+        });
+        let t = st
+            .admit()
+            .expect("capacity saturates instead of overflowing");
+        assert_eq!(st.admitted(), 1);
+        drop(t);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn waiting_times_out() {
+        let st = create_app_state_with_limits(Limits {
+            max_concurrency: 1,
+            max_queue: 4,
+            queue_timeout: Duration::from_millis(100),
+            ..Limits::default()
+        });
+        let busy = tokio::spawn({
+            let st = st.clone();
+            async move {
+                st.run_job(st.admit().unwrap(), || {
+                    std::thread::sleep(Duration::from_millis(600))
+                })
+                .await
+                .unwrap()
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let t = Instant::now();
+        let res = st.run_job(st.admit().unwrap(), || ()).await;
+        assert!(matches!(res, Err(JobError::Timeout)));
+        assert!(
+            t.elapsed() < Duration::from_millis(400),
+            "{:?}",
+            t.elapsed()
+        );
+        busy.await.unwrap();
+        assert_eq!(st.admitted(), 0);
     }
 }

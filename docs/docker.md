@@ -25,6 +25,9 @@ services:
       - RUST_LOG=info
       # Optional resource limits (see API reference)
       # - COVECTO_MAX_CONCURRENCY=2
+      # - COVECTO_MAX_QUEUE=8
+      # - COVECTO_QUEUE_TIMEOUT_SECS=30
+      # - COVECTO_UPLOAD_TIMEOUT_SECS=60
       # - COVECTO_MAX_DIMENSION=8192
       # - COVECTO_SPLINE_MAX_MP=2
     restart: unless-stopped
