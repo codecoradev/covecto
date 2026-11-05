@@ -33,3 +33,7 @@ _Avoid_: profile, template
 **Profile**:
 A named bundle defined by covecto for a kind of image (`icon`, `logo`, `photo`, `lineart`); it may choose the Engine as well as Spline's parameters. The `photo` Profile and the `photo` Preset are different things.
 _Avoid_: preset, template, mode
+
+**Optimization level**:
+How aggressively the finished SVG is cleaned up: `default`, `safe` or `none`. Supplied through the `optimize_preset` Option, but it is not a Preset.
+_Avoid_: optimize preset, preset (for this)
