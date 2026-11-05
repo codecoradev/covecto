@@ -89,11 +89,11 @@ paths:
                 preset:
                   type: string
                   enum: [bw, poster, photo]
-                  description: vtracer preset (overrides individual params)
+                  description: Preset, a vtracer starting point for Spline parameters (never chooses the engine). Applied as defaults < preset < profile < fields you send.
                 profile:
                   type: string
                   enum: [icon, logo, photo, lineart]
-                  description: Custom preset that tunes multiple params at once
+                  description: Profile, a covecto bundle for a kind of image; may choose the engine. Fields you send win over it.
                 optimize:
                   type: boolean
                   default: true

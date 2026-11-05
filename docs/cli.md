@@ -42,8 +42,8 @@ covecto vectorize [OPTIONS] <INPUT>
 | Flag | Description | Default |
 |------|-------------|---------|
 | `-e, --engine <E>` | `auto`, `spline`, `pixel-exact` | `auto` |
-| `--preset <P>` | vtracer preset: `bw`, `poster`, `photo` | — |
-| `--profile <P>` | Profile: `icon`, `logo`, `photo`, `lineart` | — |
+| `--preset <P>` | Preset (vtracer starting point for Spline parameters): `bw`, `poster`, `photo` | — |
+| `--profile <P>` | Profile (may also choose the engine): `icon`, `logo`, `photo`, `lineart`. Flags you type win over it | — |
 
 ### Vectorization Parameters
 
@@ -68,7 +68,7 @@ covecto vectorize [OPTIONS] <INPUT>
 |------|-------------|---------|
 | `--optimize[=BOOL]` | Run SVG optimization (`--optimize=false` to disable) | `true` |
 | `--no-optimize` | Disable SVG optimization | — |
-| `--optimize-preset <P>` | `default`, `safe`, `none` | `default` |
+| `--optimize-preset <P>` | Optimization level: `default`, `safe`, `none` | `default` |
 | `--multipass` | Multiple optimization passes | `false` |
 | `--multipass-iterations <N>` | Pass count (1+, capped at 16) | `10` |
 

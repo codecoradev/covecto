@@ -24,6 +24,9 @@ image = "0.25"
 
 # Vectorization engines
 vtracer = "0.6.5"
+# Must stay on the version vtracer itself uses: covecto maps its
+# PathSimplifyMode type directly (vtracer does not re-export it).
+visioncortex = "0.8.10"
 rayon = "1.11"
 
 # HTTP API

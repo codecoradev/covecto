@@ -5,7 +5,7 @@
 //! suitable for photos and illustrations.
 
 use crate::config::{
-    ColorMode, DEFAULT_SPLINE_MAX_MEGAPIXELS, HierarchicalMode, SplinePreset, VectorizeConfig,
+    ColorMode, DEFAULT_SPLINE_MAX_MEGAPIXELS, HierarchicalMode, PathSimplifyMode, VectorizeConfig,
 };
 use crate::{Error, Result};
 use image::RgbaImage;
@@ -98,16 +98,9 @@ fn to_color_image(img: &RgbaImage) -> vtracer::ColorImage {
     }
 }
 
+/// Map a resolved config onto vtracer's. A Preset was already expanded into
+/// these fields by `options::resolve`, so this is a plain field mapping.
 fn build_vtracer_config(config: &VectorizeConfig) -> VConfig {
-    if let Some(preset) = config.spline_preset {
-        let v_preset = match preset {
-            SplinePreset::Bw => vtracer::Preset::Bw,
-            SplinePreset::Poster => vtracer::Preset::Poster,
-            SplinePreset::Photo => vtracer::Preset::Photo,
-        };
-        return VConfig::from_preset(v_preset);
-    }
-
     let mut vc = VConfig::default();
 
     if let Some(cm) = config.color_mode {
@@ -144,6 +137,14 @@ fn build_vtracer_config(config: &VectorizeConfig) -> VConfig {
         vc.hierarchical = match h {
             HierarchicalMode::Stacked => VHierarchical::Stacked,
             HierarchicalMode::Cutout => VHierarchical::Cutout,
+        };
+    }
+    // Was never mapped before, so `--path-simplify` was silently ignored.
+    if let Some(m) = config.path_simplify_mode {
+        vc.mode = match m {
+            PathSimplifyMode::Spline => visioncortex::PathSimplifyMode::Spline,
+            PathSimplifyMode::Polygon => visioncortex::PathSimplifyMode::Polygon,
+            PathSimplifyMode::None => visioncortex::PathSimplifyMode::None,
         };
     }
 

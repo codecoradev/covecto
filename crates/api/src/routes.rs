@@ -5,10 +5,10 @@ use axum::{
     response::{IntoResponse, Json, Response},
 };
 use covecto_core::{
-    Engine, OptimizeConfig, OptimizePreset, OutputFormat, VectorizeConfig, VectorizeRequest,
-    convert_output, load_image_from_bytes_with_limit, optimize_svg, vectorize as core_vectorize,
+    OptimizeConfig, OptimizePreset, OutputFormat, VectorizeRequest, convert_output,
+    load_image_from_bytes_with_limit, optimize_svg, vectorize as core_vectorize,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tracing::info;
 
 use super::state::{AppState, JobError};
@@ -39,30 +39,6 @@ pub async fn metrics(State(state): State<AppState>) -> Json<MetricsResponse> {
     })
 }
 
-#[derive(Deserialize)]
-struct VectorizeParams {
-    format: Option<String>,
-    engine: Option<String>,
-    profile: Option<String>,
-    optimize: Option<bool>,
-    optimize_preset: Option<String>,
-    multipass: Option<bool>,
-    multipass_iterations: Option<usize>,
-    preset: Option<String>,
-    color_precision: Option<i32>,
-    filter_speckle: Option<usize>,
-    corner_threshold: Option<i32>,
-    splice_threshold: Option<i32>,
-    hierarchical: Option<String>,
-    path_simplify: Option<String>,
-    layer_difference: Option<i32>,
-    length_threshold: Option<f64>,
-    max_iterations: Option<usize>,
-    path_precision: Option<u32>,
-    color_mode: Option<String>,
-    spline_max_mp: Option<f64>,
-}
-
 #[derive(Serialize)]
 pub struct VectorizeResponse {
     svg: String,
@@ -77,28 +53,9 @@ pub async fn vectorize_handler(
     // Take a queue place before reading the upload (#60): when the server
     // is saturated the body is never buffered.
     let ticket = state.admit().map_err(AppError::from)?;
-    let mut params = VectorizeParams {
-        format: None,
-        engine: None,
-        profile: None,
-        optimize: None,
-        optimize_preset: None,
-        multipass: None,
-        multipass_iterations: None,
-        preset: None,
-        color_precision: None,
-        filter_speckle: None,
-        corner_threshold: None,
-        splice_threshold: None,
-        hierarchical: None,
-        path_simplify: None,
-        layer_difference: None,
-        length_threshold: None,
-        max_iterations: None,
-        path_precision: None,
-        color_mode: None,
-        spline_max_mp: None,
-    };
+    // Explicit options as sent; covecto-core resolves and validates them.
+    let mut options: Vec<(String, String)> = Vec::new();
+    let mut format: Option<String> = None;
     let mut image_data: Option<Bytes> = None;
 
     // A slow upload holds a queue place, so bound how long reading it may
@@ -106,32 +63,21 @@ pub async fn vectorize_handler(
     tokio::time::timeout(state.limits().upload_timeout, async {
         while let Some(field) = multipart.next_field().await.map_err(AppError::Multipart)? {
             let name = field.name().unwrap_or("").to_string();
-            if name == "file" || name.is_empty() {
+            let key = field_key(&name);
+            if key == "file" || key.is_empty() {
+                if image_data.is_some() {
+                    return Err(duplicate_field("file"));
+                }
                 image_data = Some(field.bytes().await.map_err(AppError::Multipart)?);
             } else {
                 let value = field.text().await.map_err(AppError::Multipart)?;
-                match name.as_str() {
-                    "format" => params.format = Some(value),
-                    "engine" => params.engine = Some(value),
-                    "optimize" => params.optimize = value.parse().ok(),
-                    "optimize_preset" => params.optimize_preset = Some(value),
-                    "multipass" => params.multipass = value.parse().ok(),
-                    "multipass_iterations" => params.multipass_iterations = value.parse().ok(),
-                    "preset" => params.preset = Some(value),
-                    "profile" => params.profile = Some(value),
-                    "color_precision" => params.color_precision = value.parse().ok(),
-                    "filter_speckle" => params.filter_speckle = value.parse().ok(),
-                    "corner_threshold" => params.corner_threshold = value.parse().ok(),
-                    "splice_threshold" => params.splice_threshold = value.parse().ok(),
-                    "hierarchical" => params.hierarchical = Some(value),
-                    "path_simplify" => params.path_simplify = Some(value),
-                    "layer_difference" => params.layer_difference = value.parse().ok(),
-                    "length_threshold" => params.length_threshold = value.parse().ok(),
-                    "max_iterations" => params.max_iterations = value.parse().ok(),
-                    "path_precision" => params.path_precision = value.parse().ok(),
-                    "spline_max_mp" => params.spline_max_mp = value.parse().ok(),
-                    "color_mode" => params.color_mode = Some(value),
-                    _ => {}
+                if key == "format" {
+                    if format.replace(value).is_some() {
+                        return Err(duplicate_field("format"));
+                    }
+                } else {
+                    // Options (including repeats) are validated by core.
+                    options.push((name, value));
                 }
             }
         }
@@ -142,74 +88,16 @@ pub async fn vectorize_handler(
 
     let data = image_data.ok_or(AppError::BadRequest("No file provided".into()))?;
 
-    let engine = params
-        .engine
-        .as_deref()
-        .unwrap_or("auto")
-        .parse::<Engine>()
-        .map_err(|e| AppError::BadRequest(e.to_string()))?;
-
-    let opt_preset = match params.optimize_preset.as_deref().unwrap_or("default") {
-        "safe" => OptimizePreset::Safe,
-        "none" => OptimizePreset::None,
-        _ => OptimizePreset::Default,
-    };
-
-    let mut config = VectorizeConfig {
-        engine,
-        optimize: params.optimize.unwrap_or(true),
-        optimize_config: OptimizeConfig {
-            preset: opt_preset,
-            multipass: params.multipass.unwrap_or(false),
-            multipass_iterations: params.multipass_iterations.unwrap_or(10),
-        },
-        spline_preset: params
-            .preset
-            .as_deref()
-            .map(|s| s.parse())
-            .transpose()
-            .ok()
-            .flatten(),
-        color_precision: params.color_precision,
-        filter_speckle: params.filter_speckle,
-        corner_threshold: params.corner_threshold,
-        splice_threshold: params.splice_threshold,
-        color_mode: params
-            .color_mode
-            .as_deref()
-            .map(|s| s.parse())
-            .transpose()
-            .ok()
-            .flatten(),
-        hierarchical: params
-            .hierarchical
-            .as_deref()
-            .map(|s| s.parse())
-            .transpose()
-            .ok()
-            .flatten(),
-        path_simplify_mode: params
-            .path_simplify
-            .as_deref()
-            .map(|s| s.parse())
-            .transpose()
-            .ok()
-            .flatten(),
-        layer_difference: params.layer_difference,
-        length_threshold: params.length_threshold,
-        max_iterations: params.max_iterations,
-        path_precision: params.path_precision,
-        spline_max_megapixels: Some(state.limits().spline_budget(params.spline_max_mp)),
-    };
-
-    // Apply profile preset (overrides individual params)
-    if let Some(ref profile) = params.profile {
-        covecto_core::apply_profile(profile, &mut config);
-    }
+    // One set of rules for every frontend: precedence (defaults < Preset <
+    // Profile < Explicit options) and strict validation -> 400.
+    let mut config =
+        covecto_core::options::resolve(options.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    // Server policy, not a domain rule: a client may only lower the budget.
+    config.spline_max_megapixels = Some(state.limits().spline_budget(config.spline_max_megapixels));
 
     // Validate the output format before doing any heavy work.
-    let output_format: OutputFormat = params
-        .format
+    let output_format: OutputFormat = format
         .as_deref()
         .unwrap_or("svg")
         .parse::<OutputFormat>()
@@ -273,24 +161,53 @@ pub async fn optimize_handler(
 ) -> Result<Json<OptimizeResponse>, AppError> {
     let ticket = state.admit().map_err(AppError::from)?;
     let mut svg_data: Option<Bytes> = None;
-    let mut preset = "default".to_string();
+    let mut preset = OptimizePreset::Default;
     let mut multipass = false;
     let mut multipass_iterations = 10usize;
 
     // A slow upload holds a queue place, so bound how long reading it may
     // take (#60): otherwise slow clients could keep every place busy.
     tokio::time::timeout(state.limits().upload_timeout, async {
+        let mut seen = std::collections::HashSet::new();
         while let Some(field) = multipart.next_field().await.map_err(AppError::Multipart)? {
             let name = field.name().unwrap_or("").to_string();
-            if name == "file" || name.is_empty() {
+            let key = field_key(&name);
+            let key = if key.is_empty() { "file".to_string() } else { key };
+            if !seen.insert(key.clone()) {
+                return Err(duplicate_field(&key));
+            }
+            if key == "file" {
                 svg_data = Some(field.bytes().await.map_err(AppError::Multipart)?);
             } else {
                 let value = field.text().await.map_err(AppError::Multipart)?;
-                match name.as_str() {
-                    "preset" => preset = value,
-                    "multipass" => multipass = value.parse().unwrap_or(false),
-                    "multipass_iterations" => multipass_iterations = value.parse().unwrap_or(10),
-                    _ => {}
+                // Same strictness as /v1/vectorize: a bad value is a 400,
+                // never a silent fallback. `preset` here is the
+                // Optimization level, not a (vtracer) Preset.
+                let bad = |what: &str| AppError::BadRequest(format!("Invalid {what}: '{value}'"));
+                match key.as_str() {
+                    "preset" => {
+                        preset = value
+                            .parse::<OptimizePreset>()
+                            .map_err(|_| bad("optimization level (default, safe, none)"))?
+                    }
+                    "multipass" => {
+                        multipass = match value.trim().to_ascii_lowercase().as_str() {
+                            "true" | "1" | "yes" | "on" => true,
+                            "false" | "0" | "no" | "off" => false,
+                            _ => return Err(bad("multipass (true or false)")),
+                        }
+                    }
+                    "multipass_iterations" => {
+                        multipass_iterations = value
+                            .trim()
+                            .parse()
+                            .map_err(|_| bad("multipass_iterations (non-negative integer)"))?
+                    }
+                    other => {
+                        return Err(AppError::BadRequest(format!(
+                            "Unknown option '{other}'. Valid: file, preset, multipass, multipass_iterations"
+                        )));
+                    }
                 }
             }
         }
@@ -304,14 +221,8 @@ pub async fn optimize_handler(
         .map_err(|e| AppError::BadRequest(format!("Invalid UTF-8: {e}")))?;
 
     let original_size = svg_str.len();
-    let opt_preset = match preset.as_str() {
-        "safe" => OptimizePreset::Safe,
-        "none" => OptimizePreset::None,
-        _ => OptimizePreset::Default,
-    };
-
     let config = OptimizeConfig {
-        preset: opt_preset,
+        preset,
         multipass,
         multipass_iterations,
     };
@@ -336,6 +247,19 @@ pub async fn optimize_handler(
         optimized_size,
         reduction_pct,
     }))
+}
+
+/// Field names are matched like Option names in core: case-insensitive,
+/// `-` and `_` interchangeable, leading `--` ignored.
+fn field_key(name: &str) -> String {
+    name.trim()
+        .trim_start_matches("--")
+        .to_ascii_lowercase()
+        .replace('-', "_")
+}
+
+fn duplicate_field(name: &str) -> AppError {
+    AppError::BadRequest(format!("Field '{name}' was sent more than once"))
 }
 
 pub enum AppError {

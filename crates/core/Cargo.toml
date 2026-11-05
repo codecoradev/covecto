@@ -11,6 +11,7 @@ description = "Dual-engine image vectorization core"
 [dependencies]
 image = { workspace = true }
 vtracer = { workspace = true }
+visioncortex = { workspace = true }
 pngtosvg = "0.6"
 rayon = { workspace = true }
 serde = { workspace = true }
