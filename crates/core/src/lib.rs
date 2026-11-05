@@ -55,6 +55,21 @@ pub struct ResultMetadata {
     pub compression_ratio: f64,
 }
 
+/// The Engine that will actually run for `config` on `image`: the configured
+/// Engine, or, for [`Engine::Auto`], the one chosen from the image's size and
+/// colors. Never returns `Engine::Auto`.
+///
+/// [`vectorize`] and [`vectorize_to`] use exactly this decision, so callers
+/// can preview it (e.g. a dry run) without it drifting from a real run. Cost:
+/// free unless the Engine is `Auto`, then one pass over at most ~131k
+/// sampled pixels.
+pub fn select_engine(config: &VectorizeConfig, image: &RgbaImage) -> Engine {
+    match config.engine {
+        Engine::Auto => auto_select_engine(image),
+        explicit => explicit,
+    }
+}
+
 /// Select the best engine based on image characteristics.
 fn auto_select_engine(img: &RgbaImage) -> Engine {
     let (w, h) = (img.width(), img.height());
@@ -177,10 +192,7 @@ fn warn_if_pathological(engine: Engine, (w, h): (u32, u32), path_count: usize) {
 
 /// Main vectorization entry point.
 pub fn vectorize(request: &VectorizeRequest) -> Result<VectorizeResult> {
-    let engine = match request.config.engine {
-        Engine::Auto => auto_select_engine(&request.image),
-        other => other,
-    };
+    let engine = select_engine(&request.config, &request.image);
 
     let start = Instant::now();
     let raw_svg = match engine {
@@ -240,10 +252,7 @@ pub fn vectorize_to<W: std::io::Write>(
     writer: &mut W,
     request: &VectorizeRequest,
 ) -> Result<StreamResult> {
-    let engine = match request.config.engine {
-        Engine::Auto => auto_select_engine(&request.image),
-        other => other,
-    };
+    let engine = select_engine(&request.config, &request.image);
 
     let start = Instant::now();
     let (w, h) = (request.image.width(), request.image.height());
@@ -519,6 +528,31 @@ mod tests {
         // No cliff around 13.1 MP: the requirement changes smoothly.
         let (a, b) = (threshold(3600, 3600), threshold(3640, 3640));
         assert!((a - b).abs() / a < 0.1, "{a} vs {b}");
+    }
+
+    #[test]
+    fn test_select_engine_matches_what_runs() {
+        let icon = RgbaImage::from_pixel(16, 16, image::Rgba([255, 0, 0, 255]));
+        let photo = RgbaImage::from_fn(512, 512, |x, y| {
+            image::Rgba([(x * 255 / 512) as u8, (y * 255 / 512) as u8, 128, 255])
+        });
+        let auto = VectorizeConfig::default();
+        assert_eq!(select_engine(&auto, &icon), Engine::PixelExact);
+        assert_eq!(select_engine(&auto, &photo), Engine::Spline);
+        // A configured Engine is returned as is (no image analysis needed).
+        let forced = options::resolve([("engine", "pixel-exact")]).unwrap();
+        assert_eq!(select_engine(&forced, &photo), Engine::PixelExact);
+        // A Profile that chooses the Engine is honoured too.
+        let icon_profile = options::resolve([("profile", "icon")]).unwrap();
+        assert_eq!(select_engine(&icon_profile, &icon), Engine::Spline);
+        // ...and the real run agrees with the preview.
+        for (config, img) in [(&auto, &icon), (&auto, &photo), (&icon_profile, &icon)] {
+            let req = VectorizeRequest::new(img.clone()).with_config(config.clone());
+            assert_eq!(
+                vectorize(&req).unwrap().engine_used,
+                select_engine(config, img)
+            );
+        }
     }
 
     #[test]

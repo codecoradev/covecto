@@ -99,5 +99,5 @@ covecto serve [OPTIONS]
 
 | Code | Meaning |
 |------|---------|
-| 0 | Success |
-| 1 | Error (file not found, invalid input, etc.) |
+| 0 | Success: every file was converted (with `--dry-run`: listed; files are only read, and so checked, for the `auto` engine) |
+| 1 | Error: invalid input or options, or at least one file in a batch failed (the others are still converted and listed) |
