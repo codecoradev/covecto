@@ -10,6 +10,10 @@ pub struct Limits {
     pub max_concurrency: usize,
     /// Maximum width or height of an uploaded image, checked before decoding.
     pub max_dimension: u32,
+    /// Server-side spline input budget in megapixels; larger images are
+    /// downscaled before tracing. Clients may request a lower budget, never a
+    /// higher one. `0` disables the server cap (then clients decide).
+    pub spline_max_megapixels: f64,
 }
 
 impl Default for Limits {
@@ -19,12 +23,14 @@ impl Default for Limits {
                 .map(|n| n.get())
                 .unwrap_or(4),
             max_dimension: covecto_core::DEFAULT_MAX_DIMENSION,
+            spline_max_megapixels: covecto_core::DEFAULT_SPLINE_MAX_MEGAPIXELS,
         }
     }
 }
 
 impl Limits {
-    /// Defaults overridden by `COVECTO_MAX_CONCURRENCY` / `COVECTO_MAX_DIMENSION`.
+    /// Defaults overridden by `COVECTO_MAX_CONCURRENCY`, `COVECTO_MAX_DIMENSION`
+    /// and `COVECTO_SPLINE_MAX_MP`.
     pub fn from_env() -> Self {
         let mut limits = Self::default();
         if let Some(n) = env_parse::<usize>("COVECTO_MAX_CONCURRENCY").filter(|&n| n > 0) {
@@ -33,7 +39,23 @@ impl Limits {
         if let Some(n) = env_parse::<u32>("COVECTO_MAX_DIMENSION").filter(|&n| n > 0) {
             limits.max_dimension = n;
         }
+        if let Some(mp) = env_parse::<f64>("COVECTO_SPLINE_MAX_MP").filter(|mp| mp.is_finite()) {
+            limits.spline_max_megapixels = mp.max(0.0);
+        }
         limits
+    }
+
+    /// Effective spline budget for a request: the client's value, capped by
+    /// the server's. A client cannot disable or raise the server cap.
+    pub fn spline_budget(&self, requested: Option<f64>) -> f64 {
+        let requested = requested.filter(|mp| mp.is_finite() && *mp > 0.0);
+        if self.spline_max_megapixels > 0.0 {
+            requested.map_or(self.spline_max_megapixels, |mp| {
+                mp.min(self.spline_max_megapixels)
+            })
+        } else {
+            requested.unwrap_or(0.0)
+        }
     }
 }
 
@@ -132,7 +154,28 @@ mod tests {
         create_app_state_with_limits(Limits {
             max_concurrency,
             max_dimension: 64,
+            spline_max_megapixels: 2.0,
         })
+    }
+
+    #[test]
+    fn spline_budget_client_can_only_lower() {
+        let limits = Limits {
+            max_concurrency: 1,
+            max_dimension: 64,
+            spline_max_megapixels: 2.0,
+        };
+        assert_eq!(limits.spline_budget(None), 2.0);
+        assert_eq!(limits.spline_budget(Some(0.5)), 0.5);
+        assert_eq!(limits.spline_budget(Some(50.0)), 2.0);
+        assert_eq!(limits.spline_budget(Some(0.0)), 2.0); // cannot disable
+        assert_eq!(limits.spline_budget(Some(f64::NAN)), 2.0);
+        let open = Limits {
+            spline_max_megapixels: 0.0,
+            ..limits
+        };
+        assert_eq!(open.spline_budget(None), 0.0);
+        assert_eq!(open.spline_budget(Some(3.0)), 3.0);
     }
 
     #[tokio::test(flavor = "current_thread")]

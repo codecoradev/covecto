@@ -337,6 +337,7 @@ async fn test_vectorize_oversized_image_returns_413() {
     let state = covecto_api::create_app_state_with_limits(covecto_api::Limits {
         max_concurrency: 1,
         max_dimension: 16,
+        spline_max_megapixels: 2.0,
     });
     let app = covecto_api::app_with_state(state.clone());
     // 32x32 > 16 per side: rejected from the header, before decoding.
@@ -378,6 +379,51 @@ async fn test_vectorize_translucent_output_is_well_formed() {
     assert_eq!(
         svg.matches("<g").count(),
         svg.matches("</g>").count(),
+        "{svg}"
+    );
+}
+
+#[tokio::test]
+async fn test_spline_downscale_server_cap_applies() {
+    // Server budget 0.0005 MP (500 px): a 32x32 (1024 px) spline job is
+    // traced smaller but keeps its 32x32 display size via viewBox, even when
+    // the client asks for a larger budget.
+    let state = covecto_api::create_app_state_with_limits(covecto_api::Limits {
+        max_concurrency: 1,
+        max_dimension: 64,
+        spline_max_megapixels: 0.0005,
+    });
+    let bytes = fixture_bytes("icon-32x32.png");
+    let boundary = "b-spline";
+    let body = build_multipart(
+        boundary,
+        &[
+            ("file", "icon-32x32.png", &bytes),
+            ("engine", "", b"spline"),
+            ("spline_max_mp", "", b"1000"),
+        ],
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/vectorize")
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let resp = covecto_api::app_with_state(state)
+        .oneshot(req)
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let svg = json["svg"].as_str().unwrap();
+    assert!(
+        svg.contains(r#"width="32" height="32" viewBox="0 0 22 22""#),
         "{svg}"
     );
 }

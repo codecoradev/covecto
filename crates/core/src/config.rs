@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+/// Default input budget for the spline engine, in megapixels (see
+/// [`VectorizeConfig::spline_max_megapixels`]).
+pub const DEFAULT_SPLINE_MAX_MEGAPIXELS: f64 = 2.0;
+
 /// Which vectorization engine to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -132,6 +136,15 @@ pub struct VectorizeConfig {
 
     /// Color mode for vtracer.
     pub color_mode: Option<ColorMode>,
+
+    /// Spline engine input budget in megapixels. vtracer's cost grows faster
+    /// than the pixel count, so larger inputs are downscaled (area average)
+    /// before tracing; the SVG keeps the original `width`/`height` and maps
+    /// the traced size with `viewBox`. `None` uses
+    /// [`DEFAULT_SPLINE_MAX_MEGAPIXELS`]; `Some(0.0)` (or any value <= 0)
+    /// disables the limit. PixelExact is never downscaled.
+    #[serde(default)]
+    pub spline_max_megapixels: Option<f64>,
 }
 
 /// Color mode for the spline engine.
@@ -223,6 +236,7 @@ impl Default for VectorizeConfig {
             max_iterations: None,
             path_precision: None,
             color_mode: None,
+            spline_max_megapixels: None,
         }
     }
 }

@@ -26,6 +26,7 @@ services:
       # Optional resource limits (see API reference)
       # - COVECTO_MAX_CONCURRENCY=2
       # - COVECTO_MAX_DIMENSION=8192
+      # - COVECTO_SPLINE_MAX_MP=2
     restart: unless-stopped
 ```
 

@@ -159,6 +159,10 @@ paths:
                   type: integer
                   minimum: 0
                   description: Path coordinate precision (decimal places)
+                spline_max_mp:
+                  type: number
+                  minimum: 0
+                  description: Spline input budget in megapixels; larger images are downscaled before tracing (output keeps the original size via viewBox). Can only lower the server cap COVECTO_SPLINE_MAX_MP (default 2).
       responses:
         '200':
           description: Vectorization successful

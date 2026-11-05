@@ -60,6 +60,7 @@ struct VectorizeParams {
     max_iterations: Option<usize>,
     path_precision: Option<u32>,
     color_mode: Option<String>,
+    spline_max_mp: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -93,6 +94,7 @@ pub async fn vectorize_handler(
         max_iterations: None,
         path_precision: None,
         color_mode: None,
+        spline_max_mp: None,
     };
     let mut image_data: Option<Bytes> = None;
 
@@ -121,6 +123,7 @@ pub async fn vectorize_handler(
                 "length_threshold" => params.length_threshold = value.parse().ok(),
                 "max_iterations" => params.max_iterations = value.parse().ok(),
                 "path_precision" => params.path_precision = value.parse().ok(),
+                "spline_max_mp" => params.spline_max_mp = value.parse().ok(),
                 "color_mode" => params.color_mode = Some(value),
                 _ => {}
             }
@@ -186,6 +189,7 @@ pub async fn vectorize_handler(
         length_threshold: params.length_threshold,
         max_iterations: params.max_iterations,
         path_precision: params.path_precision,
+        spline_max_megapixels: Some(state.limits().spline_budget(params.spline_max_mp)),
     };
 
     // Apply profile preset (overrides individual params)

@@ -94,6 +94,10 @@ struct VectorizeArgs {
     /// Path coordinate precision (decimal places)
     #[arg(long)]
     path_precision: Option<u32>,
+    /// Spline: downscale inputs above this many megapixels before tracing
+    /// (default 2; 0 = trace at full size). Output keeps the original size.
+    #[arg(long, value_name = "MP")]
+    spline_max_mp: Option<f64>,
     /// Run SVG optimization after vectorization (default: on).
     /// Disable with `--optimize=false` or `--no-optimize`.
     #[arg(
@@ -192,6 +196,7 @@ struct VectorizeOpts {
     length_threshold: Option<f64>,
     max_iterations: Option<usize>,
     path_precision: Option<u32>,
+    spline_max_mp: Option<f64>,
     optimize: bool,
     optimize_preset: String,
     multipass: bool,
@@ -241,6 +246,7 @@ impl VectorizeOpts {
             length_threshold: self.length_threshold,
             max_iterations: self.max_iterations,
             path_precision: self.path_precision,
+            spline_max_megapixels: self.spline_max_mp,
         };
 
         if let Some(ref profile) = self.profile {
@@ -767,6 +773,7 @@ fn from_args(args: VectorizeArgs) -> VectorizeOpts {
         length_threshold: args.length_threshold,
         max_iterations: args.max_iterations,
         path_precision: args.path_precision,
+        spline_max_mp: args.spline_max_mp,
         optimize: args.optimize && !args.no_optimize,
         optimize_preset: args.optimize_preset,
         multipass: args.multipass,

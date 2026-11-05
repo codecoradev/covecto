@@ -45,6 +45,7 @@ covecto input.png --path-simplify polygon -o out.svg
 |-----------|----------|-------------|
 | Filter speckle | `--filter-speckle <N>` | Remove regions smaller than N pixels |
 | Max iterations | `--max-iterations <N>` | Max color quantization iterations |
+| Spline input budget | `--spline-max-mp <MP>` | Downscale larger inputs before tracing (default `2`, `0` = off) |
 
 ## Layer Controls
 

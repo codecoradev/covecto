@@ -14,8 +14,8 @@ mod optimize;
 
 pub use config::apply_profile;
 pub use config::{
-    ColorMode, Engine, HierarchicalMode, OptimizeConfig, OptimizePreset, PathSimplifyMode,
-    SplinePreset, VectorizeConfig, VectorizeRequest,
+    ColorMode, DEFAULT_SPLINE_MAX_MEGAPIXELS, Engine, HierarchicalMode, OptimizeConfig,
+    OptimizePreset, PathSimplifyMode, SplinePreset, VectorizeConfig, VectorizeRequest,
 };
 pub use engine::{pixel_exact, spline};
 pub use error::{
@@ -66,16 +66,20 @@ fn auto_select_engine(img: &RgbaImage) -> Engine {
 
     // Count unique colors (sample-based for large images). Once the count
     // exceeds both thresholds below, the result is Spline regardless.
-    let density_threshold = (total_pixels * 0.005) as usize;
+    let samples = sample_count(img.as_raw().len() / 4);
+    let denominator = density_denominator(total_pixels, samples);
+    let density_threshold = (denominator * 0.005) as usize;
     let cap = 129usize.max(density_threshold + 1);
     let unique_colors = count_unique_colors(img, cap);
+    choose_engine(w, h, unique_colors, denominator)
+}
 
-    // Heuristic:
-    // - Small images (<= 256x256) with few colors (<= 128) → PixelExact
-    // - Very high unique color density → Spline (likely a photo)
-    // - Otherwise → PixelExact (lossless, fast)
-    let color_density = unique_colors as f64 / total_pixels;
-
+/// Pure engine decision.
+/// - Small images (<= 256x256) with few colors (<= 128) → PixelExact
+/// - Very high unique color density → Spline (likely a photo)
+/// - Otherwise → PixelExact (lossless, fast)
+fn choose_engine(w: u32, h: u32, unique_colors: usize, denominator: f64) -> Engine {
+    let color_density = unique_colors as f64 / denominator;
     if w <= 256 && h <= 256 && unique_colors <= 128 {
         Engine::PixelExact
     } else if color_density > 0.005 {
@@ -85,15 +89,48 @@ fn auto_select_engine(img: &RgbaImage) -> Engine {
     }
 }
 
+/// Target number of pixels sampled by [`count_unique_colors`]. The integer
+/// step means the real count is between this and twice this.
+const COLOR_SAMPLE_LIMIT: usize = 65_536;
+
+/// Number of pixels [`count_unique_colors`] looks at for `total` pixels.
+fn sample_count(total: usize) -> usize {
+    let step = if total > COLOR_SAMPLE_LIMIT {
+        total / COLOR_SAMPLE_LIMIT
+    } else {
+        1
+    };
+    total.div_ceil(step)
+}
+
+/// What the unique-color count is divided by. Normally the total pixel
+/// count. But the count comes from at most ~65k-131k samples, so for images
+/// above ~13.1 MP `samples / total` can never exceed the 0.005 threshold and
+/// Spline could never be chosen (a large photo went to PixelExact and
+/// produced a huge SVG, #60). In that range only, the density is measured
+/// over the samples. Below it the decision is unchanged.
+fn density_denominator(total_pixels: f64, samples: usize) -> f64 {
+    if total_pixels * 0.005 >= samples as f64 {
+        samples as f64
+    } else {
+        total_pixels
+    }
+}
+
 /// Count unique RGBA colors in an image, up to `cap`.
-/// For large images, samples up to 65_536 pixels to keep this fast.
+/// For large images, samples roughly 65_536 to 131_071 pixels (see
+/// [`sample_count`]) to keep this fast.
 /// Stops early once `cap` distinct colors are seen: past that point the
 /// engine decision no longer depends on the exact count.
 fn count_unique_colors(img: &RgbaImage, cap: usize) -> usize {
     use std::collections::HashSet;
     let raw = img.as_raw();
     let total = raw.len() / 4;
-    let step = if total > 65_536 { total / 65_536 } else { 1 };
+    let step = if total > COLOR_SAMPLE_LIMIT {
+        total / COLOR_SAMPLE_LIMIT
+    } else {
+        1
+    };
 
     let mut colors: HashSet<u32> = HashSet::with_capacity(cap.min(4096));
     for px in raw.chunks_exact(4).step_by(step) {
@@ -454,6 +491,22 @@ mod tests {
                 assert_eq!(optimize_svg(&svg, &config).unwrap(), svg, "{preset:?}");
             }
         }
+    }
+
+    #[test]
+    fn test_auto_select_large_photo_blind_spot() {
+        // Above ~13.1 MP the old density (sampled count / total pixels) could
+        // never pass 0.005, so even an all-unique photo chose PixelExact.
+        let total = 4000.0 * 4000.0;
+        let samples = sample_count(4000 * 4000);
+        assert!(samples < 2 * COLOR_SAMPLE_LIMIT, "{samples}");
+        let denom = density_denominator(total, samples);
+        assert_eq!(denom, samples as f64);
+        assert_eq!(choose_engine(4000, 4000, samples, denom), Engine::Spline);
+        assert_eq!(choose_engine(4000, 4000, 40, denom), Engine::PixelExact);
+        // Below the blind spot the decision is unchanged (divides by total).
+        let (t2, s2) = (2000.0 * 2000.0, sample_count(2000 * 2000));
+        assert_eq!(density_denominator(t2, s2), t2);
     }
 
     #[test]

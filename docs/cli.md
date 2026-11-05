@@ -60,6 +60,7 @@ covecto vectorize [OPTIONS] <INPUT>
 | `--length-threshold <F>` | float | Minimum path length |
 | `--max-iterations <N>` | int | Max color quantization iterations |
 | `--path-precision <N>` | int | Path coordinate decimal places |
+| `--spline-max-mp <MP>` | float | Spline: downscale inputs above this many megapixels before tracing (default `2`, `0` = full size) |
 
 ### Optimization
 
