@@ -4,7 +4,7 @@
 //! results are deterministic and no binary fixtures are needed.
 
 use covecto_core::{
-    Engine, OptimizeConfig, VectorizeRequest, optimize_svg, pixel_exact, vectorize, vectorize_to,
+    Engine, OptimizeConfig, VectorizeRequest, optimize_svg, vectorize, vectorize_to,
 };
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use image::{Rgba, RgbaImage};
@@ -82,7 +82,14 @@ fn bench_engines(c: &mut Criterion) {
 fn bench_optimizer(c: &mut Criterion) {
     let mut group = c.benchmark_group("optimize_svg");
     let config = OptimizeConfig::default();
-    let pixel_svg = pixel_exact::vectorize(&noise(128)).unwrap();
+    // Raw PixelExact output (the optimizer is skipped for PixelExact anyway).
+    let pixel_svg = vectorize(
+        &VectorizeRequest::new(noise(128))
+            .with_engine(Engine::PixelExact)
+            .with_optimize(false),
+    )
+    .unwrap()
+    .svg;
     let spline_svg = vectorize(&VectorizeRequest::new(photo(256)).with_engine(Engine::Spline))
         .unwrap()
         .svg;

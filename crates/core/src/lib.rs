@@ -18,12 +18,12 @@ pub use config::{
     ColorMode, DEFAULT_SPLINE_MAX_MEGAPIXELS, Engine, HierarchicalMode, OptimizeConfig,
     OptimizePreset, PathSimplifyMode, SplinePreset, VectorizeConfig, VectorizeRequest,
 };
-pub use engine::{pixel_exact, spline};
 pub use error::{Error, Result};
 pub use export::{OutputFormat, convert_output};
 pub use load::{DEFAULT_MAX_DIMENSION, ImageLimits, ImageSource, load_image};
 pub use optimize::{MAX_MULTIPASS_ITERATIONS, optimize_svg};
 
+use engine::{EngineOutput, pixel_exact, spline};
 use image::RgbaImage;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -286,7 +286,7 @@ fn render<W: std::io::Write>(
     writer: &mut W,
     engine: Engine,
     request: &VectorizeRequest,
-) -> Result<pixel_exact::VectorizeMeta> {
+) -> Result<EngineOutput> {
     match engine {
         Engine::PixelExact => pixel_exact::vectorize_to(writer, &request.image),
         Engine::Spline => spline::vectorize_to(writer, &request.image, &request.config),
