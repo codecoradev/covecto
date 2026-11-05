@@ -61,20 +61,24 @@ fn optimize_once(svg: &str, preset: OptimizePreset) -> Cow<'_, str> {
     out
 }
 
-/// Positions of `<name` where `name` is a whole tag name
-/// (followed by whitespace, `>` or `/`).
-fn find_tag(s: &str, name: &str, from: usize) -> Option<usize> {
+/// Whether a `<name` tag (whole tag name, followed by whitespace, `>` or
+/// `/`) starts exactly at `pos`. O(name length).
+fn is_tag_at(s: &str, name: &str, pos: usize) -> bool {
     let bytes = s.as_bytes();
+    let after = pos + 1 + name.len();
+    bytes.get(pos) == Some(&b'<')
+        && s.get(pos + 1..).is_some_and(|rest| rest.starts_with(name))
+        && bytes
+            .get(after)
+            .is_none_or(|&b| b == b'>' || b == b'/' || b.is_ascii_whitespace())
+}
+
+/// Position of the next `<name` tag at or after `from` (see [`is_tag_at`]).
+fn find_tag(s: &str, name: &str, from: usize) -> Option<usize> {
     let mut search = from;
     while let Some(rel) = s[search..].find('<') {
         let pos = search + rel;
-        let after = pos + 1 + name.len();
-        if s[pos + 1..].starts_with(name)
-            && after <= bytes.len()
-            && bytes
-                .get(after)
-                .is_none_or(|&b| b == b'>' || b == b'/' || b.is_ascii_whitespace())
-        {
+        if is_tag_at(s, name, pos) {
             return Some(pos);
         }
         search = pos + 1;
@@ -166,7 +170,7 @@ fn remove_empty_elements(s: &str, name: &str) -> Option<String> {
             continue;
         }
 
-        if find_tag(s, name, lt) == Some(lt)
+        if is_tag_at(s, name, lt)
             && let Some((end, self_closing)) = tag_end(s, lt)
         {
             if self_closing {
@@ -295,13 +299,16 @@ fn shorten_numbers_in(d: &str, out: &mut String) {
     let len = bytes.len();
     let mut i = 0;
     while i < len {
-        let starts_number = bytes[i].is_ascii_digit()
-            || (bytes[i] == b'-' && i + 1 < len && bytes[i + 1].is_ascii_digit());
+        // A number starts with a digit, or `.digit`, optionally after `-`.
+        let digit_at = |j: usize| j < len && bytes[j].is_ascii_digit();
+        let unsigned_at =
+            |j: usize| digit_at(j) || (j < len && bytes[j] == b'.' && digit_at(j + 1));
+        let starts_number = unsigned_at(i) || (bytes[i] == b'-' && unsigned_at(i + 1));
         if !starts_number {
             // Copy everything up to the next possible number start verbatim
             // (keeps multi-byte UTF-8 intact).
             let next = d[i + 1..]
-                .find(|c: char| c.is_ascii_digit() || c == '-')
+                .find(|c: char| c.is_ascii_digit() || c == '-' || c == '.')
                 .map_or(len, |p| i + 1 + p);
             out.push_str(&d[i..next]);
             i = next;
@@ -311,9 +318,11 @@ fn shorten_numbers_in(d: &str, out: &mut String) {
         if bytes[i] == b'-' {
             i += 1;
         }
+        let int_start = i;
         while i < len && bytes[i].is_ascii_digit() {
             i += 1;
         }
+        let has_int = i > int_start;
         if i >= len || bytes[i] != b'.' {
             out.push_str(&d[start..i]);
             continue;
@@ -339,10 +348,11 @@ fn shorten_numbers_in(d: &str, out: &mut String) {
             trim_to -= 1;
         }
         if trim_to == decimal_start {
-            // Whole fraction is zero. In compact path data a following "."
-            // starts the next number ("1.0.5" = 1.0 and .5), so dropping the
-            // fraction would merge them into "1.5": keep the number as-is.
-            if i < len && bytes[i] == b'.' {
+            // Whole fraction is zero. Keep the number as-is when dropping it
+            // would change the token stream: a following "." starts the next
+            // number ("1.0.5" = 1.0 and .5, not 1.5), and ".0" has no integer
+            // digits left to emit.
+            if !has_int || (i < len && bytes[i] == b'.') {
                 out.push_str(&d[start..i]);
             } else {
                 out.push_str(&d[start..decimal_start - 1]); // skip the dot
@@ -609,6 +619,31 @@ mod tests {
         assert_eq!(
             shorten_path_numbers(input).unwrap(),
             r#"<path d="M1.0.5L2.5.25 3 4"/>"#
+        );
+    }
+
+    #[test]
+    fn test_shorten_numbers_leading_dot() {
+        // ".5.0" is two numbers (.5 and .0); must not lose the second one.
+        let input = r#"<path d="M.5.0L-.50 .250 .0 1.0.0"/>"#;
+        assert_eq!(
+            shorten_path_numbers(input).unwrap(),
+            r#"<path d="M.5.0L-.5 .25 .0 1.0.0"/>"#
+        );
+    }
+
+    #[test]
+    fn test_remove_empty_groups_linear_without_matches() {
+        // Regression: checking each '<' with find_tag rescanned the rest of
+        // the document when it contained no matching tag (quadratic).
+        let input = format!("<svg>{}</svg>", "<path d=\"M0 0\"/>".repeat(300_000));
+        let t = std::time::Instant::now();
+        assert_eq!(remove_empty_elements(&input, "defs"), None);
+        assert_eq!(remove_empty_groups(&input), None);
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            t.elapsed()
         );
     }
 

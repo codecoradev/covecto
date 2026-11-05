@@ -58,7 +58,7 @@ pub struct ResultMetadata {
 /// Select the best engine based on image characteristics.
 fn auto_select_engine(img: &RgbaImage) -> Engine {
     let (w, h) = (img.width(), img.height());
-    let total_pixels = (w * h) as f64;
+    let total_pixels = f64::from(w) * f64::from(h);
 
     if total_pixels == 0.0 {
         return Engine::PixelExact;

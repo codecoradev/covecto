@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optimizer: empty-group and metadata removal are now single linear passes; deeply nested `<g>` input (e.g. via `/v1/optimize`) was quadratic
 - Optimizer: path-number shortening no longer garbles non-ASCII text (bytes were copied as Latin-1 chars) and keeps compact path data like `1.0.5` (= 1.0, .5) from merging into `1.5`
 - Optimizer: `clean_empty_attributes` only removes standalone `id=""`/`class=""`, no longer leaving a broken `data-` behind
+- Optimizer: numbers starting with `.` (`.5`, `-.5`) are parsed as numbers, so compact path data like `M.5.0` no longer loses a coordinate
+- PixelExact and engine auto-selection use 64-bit pixel index math (u32 overflowed above ~32k px per side)
 - CLI `--optimize` could not be turned off; added `--optimize=false` and `--no-optimize` (#58)
 - CLI: `vectorize` is now the default subcommand, so the documented `covecto input.png -o out.svg` works (#58)
 

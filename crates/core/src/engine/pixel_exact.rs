@@ -12,7 +12,7 @@ use std::io::Write as _;
 
 /// Vectorize an image using pixel-exact algorithm.
 pub fn vectorize(img: &RgbaImage) -> Result<String> {
-    let mut buf = Vec::with_capacity((img.width() * img.height() * 3) as usize);
+    let mut buf = Vec::with_capacity(img.width() as usize * img.height() as usize * 3);
     vectorize_to(&mut buf, img)?;
     // SVG output is always valid UTF-8 (ASCII path commands + hex colors)
     Ok(unsafe { String::from_utf8_unchecked(buf) })
@@ -33,7 +33,7 @@ pub fn vectorize_to<W: std::io::Write>(writer: &mut W, img: &RgbaImage) -> Resul
     let raw = img.as_raw();
 
     let get_rgba = |x: u32, y: u32| -> [u8; 4] {
-        let i = ((y * width + x) * 4) as usize;
+        let i = (y as usize * width as usize + x as usize) * 4;
         [raw[i], raw[i + 1], raw[i + 2], raw[i + 3]]
     };
 
@@ -56,7 +56,7 @@ pub fn vectorize_to<W: std::io::Write>(writer: &mut W, img: &RgbaImage) -> Resul
 
     for y in 0..height {
         for x in 0..width {
-            let idx = (y * width + x) as usize;
+            let idx = y as usize * width as usize + x as usize;
             if visited.get(idx) {
                 continue;
             }
@@ -84,7 +84,7 @@ pub fn vectorize_to<W: std::io::Write>(writer: &mut W, img: &RgbaImage) -> Resul
                         } else {
                             let (nx_u, ny_u) = (nx as u32, ny as u32);
                             if get_rgba(nx_u, ny_u) == colors {
-                                let n_idx = (ny_u * width + nx_u) as usize;
+                                let n_idx = ny_u as usize * width as usize + nx_u as usize;
                                 if !visited.get(n_idx) {
                                     visited.set(n_idx);
                                     queue.push((nx, ny));
