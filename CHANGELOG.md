@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (image loading)
+- **Breaking (library):** one loader, `load_image(source, ImageLimits)`, replaces `load_image(path)`, `load_image_from_bytes` and `load_image_from_bytes_with_limit`. The source is a path or bytes; the size limit is checked from the header before decoding
+- CLI: images are size-checked before decoding like the API (default 8192 px per side), so a batch can no longer decode a decompression bomb on every thread; `--max-dimension <PX>` changes it (`0` = no limit)
+
 ### Changed (engine preview)
 - `--dry-run` shows the engine a real run would use: it calls core's new `select_engine` (also used by `vectorize`/`vectorize_to`) instead of a size-only guess that ignored `--engine`, `--profile` and the color heuristic. With an `auto` engine each image is decoded (in parallel) and marked `(auto)`; this replaces the "never decode" rule of #21
 - **Breaking (CLI):** a batch with failed files, and a dry run with unreadable files, now exits with code 1 (it exited 0 after printing the errors)

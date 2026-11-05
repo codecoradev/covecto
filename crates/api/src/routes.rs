@@ -5,8 +5,8 @@ use axum::{
     response::{IntoResponse, Json, Response},
 };
 use covecto_core::{
-    OptimizeConfig, OptimizePreset, OutputFormat, VectorizeRequest, convert_output,
-    load_image_from_bytes_with_limit, optimize_svg, vectorize as core_vectorize,
+    ImageLimits, OptimizeConfig, OptimizePreset, OutputFormat, VectorizeRequest, convert_output,
+    load_image, optimize_svg, vectorize as core_vectorize,
 };
 use serde::Serialize;
 use tracing::info;
@@ -109,8 +109,8 @@ pub async fn vectorize_handler(
         .run_job(ticket, move || -> Result<_, AppError> {
             // Decode errors are the client's input (4xx); errors after a
             // successful decode are ours (5xx).
-            let img = load_image_from_bytes_with_limit(&data, None, max_dimension)
-                .map_err(AppError::Decode)?;
+            let img =
+                load_image(&data[..], ImageLimits { max_dimension }).map_err(AppError::Decode)?;
             drop(data);
             let req = VectorizeRequest::new(img).with_config(config);
             let result = core_vectorize(&req).map_err(AppError::Core)?;

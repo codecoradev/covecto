@@ -66,6 +66,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Loading images safely
+
+`load_image` decodes a file or bytes to RGBA and checks the size from the
+image header first, so a small, highly compressible file cannot expand into a
+huge allocation:
+
+```rust
+use covecto_core::{load_image, ImageLimits};
+
+let img = load_image(std::path::Path::new("input.png"), ImageLimits::default())?; // 8192 px per side
+let upload = load_image(&bytes[..], ImageLimits { max_dimension: 4096 })?;
+let trusted = load_image(std::path::Path::new("big.tif"), ImageLimits::UNLIMITED)?;
+```
+
 ## Building a config from user options
 
 If your app takes options from users (a form, a config file, an FFI map),

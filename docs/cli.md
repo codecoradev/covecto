@@ -84,6 +84,7 @@ streaming to disk stays fully incremental.
 | `--json-pretty` | Pretty-printed JSON | `false` |
 | `--no-progress` | Disable progress bar/spinner | `false` |
 | `--dry-run` | Preview without processing | `false` |
+| `--max-dimension <PX>` | Refuse images wider or taller than this, checked before decoding (`0` = no limit) | `8192` |
 
 ## serve
 

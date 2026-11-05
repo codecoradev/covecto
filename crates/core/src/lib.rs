@@ -10,6 +10,7 @@ mod config;
 mod engine;
 mod error;
 mod export;
+mod load;
 mod optimize;
 pub mod options;
 
@@ -18,11 +19,9 @@ pub use config::{
     OptimizePreset, PathSimplifyMode, SplinePreset, VectorizeConfig, VectorizeRequest,
 };
 pub use engine::{pixel_exact, spline};
-pub use error::{
-    DEFAULT_MAX_DIMENSION, Error, Result, load_image, load_image_from_bytes,
-    load_image_from_bytes_with_limit,
-};
+pub use error::{Error, Result};
 pub use export::{OutputFormat, convert_output};
+pub use load::{DEFAULT_MAX_DIMENSION, ImageLimits, ImageSource, load_image};
 pub use optimize::{MAX_MULTIPASS_ITERATIONS, optimize_svg};
 
 use image::RgbaImage;
