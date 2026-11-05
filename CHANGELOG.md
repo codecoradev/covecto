@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (public interface)
+- **Breaking (library):** the engine modules `covecto_core::pixel_exact` and `covecto_core::spline` (and `pixel_exact::VectorizeMeta`) are no longer public. Use `vectorize`, `vectorize_to` or `render_to`, choosing the engine with `VectorizeConfig::engine` (or `options::resolve`); for raw, unoptimized output add `.with_optimize(false)`. Streaming metadata is in `StreamResult::metadata`; `select_engine` tells which engine Auto picks
+
 ### Changed (output formats)
 - New `covecto_core::render_to(writer, request, format) -> RenderResult`: one interface for SVG (streamed), PDF and EPS. The CLI and the API no longer branch on the format themselves; the CLI's JSON report comes from `RenderResult` (no more placeholder result)
 - **Breaking (library):** `convert_output` returns just the bytes; the MIME type is `OutputFormat::content_type()`

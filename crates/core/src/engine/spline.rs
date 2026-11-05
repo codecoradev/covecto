@@ -78,11 +78,11 @@ pub fn vectorize_to<W: std::io::Write>(
     writer: &mut W,
     img: &RgbaImage,
     config: &VectorizeConfig,
-) -> Result<super::pixel_exact::VectorizeMeta> {
+) -> Result<super::EngineOutput> {
     let svg = vectorize(img, config)?;
     let bytes = svg.as_bytes();
     writer.write_all(bytes)?;
-    Ok(super::pixel_exact::VectorizeMeta {
+    Ok(super::EngineOutput {
         byte_count: bytes.len(),
         path_count: svg.matches("<path").count(),
     })

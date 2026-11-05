@@ -4,6 +4,7 @@
 //! boundaries, and emits compact rectilinear SVG paths (M/h/v/Z commands only).
 //! Zero information loss — every pixel is exactly reproduced.
 
+use super::EngineOutput;
 use crate::Result;
 use image::RgbaImage;
 use std::collections::BTreeMap;
@@ -18,16 +19,9 @@ pub fn vectorize(img: &RgbaImage) -> Result<String> {
     Ok(unsafe { String::from_utf8_unchecked(buf) })
 }
 
-/// Metadata returned by streaming vectorize (without the SVG string).
-#[derive(Debug, Clone)]
-pub struct VectorizeMeta {
-    pub byte_count: usize,
-    pub path_count: usize,
-}
-
 /// Vectorize an image using pixel-exact algorithm, writing SVG directly to a writer.
 /// This avoids building the full SVG string in memory.
-pub fn vectorize_to<W: std::io::Write>(writer: &mut W, img: &RgbaImage) -> Result<VectorizeMeta> {
+pub fn vectorize_to<W: std::io::Write>(writer: &mut W, img: &RgbaImage) -> Result<EngineOutput> {
     let width = img.width();
     let height = img.height();
     let raw = img.as_raw();
@@ -257,7 +251,7 @@ pub fn vectorize_to<W: std::io::Write>(writer: &mut W, img: &RgbaImage) -> Resul
 
     writer.write_all(b"</svg>\n")?;
 
-    Ok(VectorizeMeta {
+    Ok(EngineOutput {
         byte_count: writer.bytes,
         path_count: writer.paths,
     })
