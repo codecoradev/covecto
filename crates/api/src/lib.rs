@@ -3,7 +3,9 @@
 pub(crate) mod routes;
 pub(crate) mod state;
 
-pub use state::{AppState, Limits, create_app_state, create_app_state_with_limits};
+pub use state::{
+    AppState, JobError, Limits, Ticket, create_app_state, create_app_state_with_limits,
+};
 
 use axum::Router;
 use axum::routing::{get, post};

@@ -230,7 +230,7 @@ async fn test_vectorize_invalid_engine_returns_400() {
 }
 
 #[tokio::test]
-async fn test_vectorize_invalid_file_returns_500() {
+async fn test_vectorize_invalid_file_returns_415() {
     let app = app();
     let boundary = "test-boundary-12345";
 
@@ -258,7 +258,7 @@ async fn test_vectorize_invalid_file_returns_500() {
         .unwrap();
 
     let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
 }
 
 #[tokio::test]
@@ -338,6 +338,7 @@ async fn test_vectorize_oversized_image_returns_413() {
         max_concurrency: 1,
         max_dimension: 16,
         spline_max_megapixels: 2.0,
+        ..covecto_api::Limits::default()
     });
     let app = covecto_api::app_with_state(state.clone());
     // 32x32 > 16 per side: rejected from the header, before decoding.
@@ -392,6 +393,7 @@ async fn test_spline_downscale_server_cap_applies() {
         max_concurrency: 1,
         max_dimension: 64,
         spline_max_megapixels: 0.0005,
+        ..covecto_api::Limits::default()
     });
     let bytes = fixture_bytes("icon-32x32.png");
     let boundary = "b-spline";
@@ -426,4 +428,50 @@ async fn test_spline_downscale_server_cap_applies() {
         svg.contains(r#"width="32" height="32" viewBox="0 0 22 22" preserveAspectRatio="none""#),
         "{svg}"
     );
+}
+
+#[tokio::test]
+async fn test_vectorize_corrupt_image_returns_400() {
+    // #60: a recognized but broken image is the client's fault, not a 500.
+    let mut bytes = fixture_bytes("icon-32x32.png");
+    bytes.truncate(bytes.len() / 2);
+    let resp = app()
+        .oneshot(multipart_request("broken.png", &bytes))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_saturated_queue_returns_503_before_reading_body() {
+    // #60: 1 running slot, no waiting room. While the place is taken, a new
+    // request is rejected with 503 + Retry-After; once freed, it succeeds.
+    let state = covecto_api::create_app_state_with_limits(covecto_api::Limits {
+        max_concurrency: 1,
+        max_queue: 0,
+        ..covecto_api::Limits::default()
+    });
+    let held = state.admit().unwrap();
+    let bytes = fixture_bytes("icon-32x32.png");
+
+    let resp = covecto_api::app_with_state(state.clone())
+        .oneshot(multipart_request("icon-32x32.png", &bytes))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(resp.headers()["retry-after"], "1");
+    assert_eq!(
+        state.admitted(),
+        1,
+        "rejected request must not keep a place"
+    );
+    assert_eq!(state.request_count(), 0);
+
+    drop(held);
+    let resp = covecto_api::app_with_state(state.clone())
+        .oneshot(multipart_request("icon-32x32.png", &bytes))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(state.admitted(), 0);
 }

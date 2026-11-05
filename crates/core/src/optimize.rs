@@ -122,21 +122,30 @@ fn skip_ws(s: &str, i: usize) -> usize {
         .unwrap_or(s.len())
 }
 
-/// Remove elements named `name` that are self-closing (`<x .../>`) or
-/// have no content (`<x ...></x>`, whitespace only). Non-empty elements are
-/// kept. Nested empties (`<g><g/></g>`) collapse fully.
+/// After removing an element ending at `i`, also drop the whitespace that
+/// follows it, but only when that whitespace is indentation (contains a line
+/// break). A plain space may be significant text (`Hello<title/> world`).
+fn skip_indent(s: &str, i: usize) -> usize {
+    let j = skip_ws(s, i);
+    if s[i..j].contains('\n') { j } else { i }
+}
+
+/// Remove elements whose name is in `names` that are self-closing
+/// (`<x .../>`) or have no content (`<x ...></x>`, whitespace only).
+/// Non-empty elements are kept. Nested empties collapse fully, across names
+/// too (`<g><g/></g>`, `<defs><g/></defs>`, `<g><defs/></g>`).
 ///
 /// Single linear pass with a stack of open elements, so deeply nested input
 /// cannot make this quadratic.
-fn remove_empty_elements(s: &str, name: &str) -> Option<String> {
-    let close = format!("</{name}>");
+fn remove_empty_elements(s: &str, names: &[&str]) -> Option<String> {
+    let closes: Vec<String> = names.iter().map(|n| format!("</{n}>")).collect();
     let mut out = String::with_capacity(s.len());
-    // (output length before the open tag, element has kept content)
-    let mut stack: Vec<(usize, bool)> = Vec::new();
+    // (output length before the open tag, element has kept content, name index)
+    let mut stack: Vec<(usize, bool, usize)> = Vec::new();
     let mut changed = false;
     let mut i = 0;
 
-    let mark_content = |stack: &mut Vec<(usize, bool)>| {
+    let mark_content = |stack: &mut Vec<(usize, bool, usize)>| {
         if let Some(top) = stack.last_mut() {
             top.1 = true;
         }
@@ -156,21 +165,26 @@ fn remove_empty_elements(s: &str, name: &str) -> Option<String> {
         }
         out.push_str(&s[i..lt]);
 
-        if s[lt..].starts_with(&close) {
+        if let Some(k) = closes.iter().position(|c| s[lt..].starts_with(c.as_str())) {
+            let close = &closes[k];
             let after = lt + close.len();
-            match stack.pop() {
-                Some((open_at, false)) => {
+            match stack.last().copied() {
+                Some((open_at, false, top)) if top == k => {
+                    stack.pop();
                     out.truncate(open_at);
-                    i = skip_ws(s, after);
+                    i = skip_indent(s, after);
                     changed = true;
                 }
-                Some((_, true)) => {
-                    out.push_str(&close);
+                Some((_, true, top)) if top == k => {
+                    stack.pop();
+                    out.push_str(close);
                     mark_content(&mut stack);
                     i = after;
                 }
-                None => {
-                    out.push_str(&close);
+                // Unbalanced or mismatched close: keep it, as content.
+                _ => {
+                    mark_content(&mut stack);
+                    out.push_str(close);
                     i = after;
                 }
             }
@@ -186,12 +200,12 @@ fn remove_empty_elements(s: &str, name: &str) -> Option<String> {
             break;
         };
 
-        if is_tag_at(s, name, lt) {
+        if let Some(k) = names.iter().position(|n| is_tag_at(s, n, lt)) {
             if self_closing {
-                i = skip_ws(s, end);
+                i = skip_indent(s, end);
                 changed = true;
             } else {
-                stack.push((out.len(), false));
+                stack.push((out.len(), false, k));
                 out.push_str(&s[lt..end]);
                 i = end;
             }
@@ -242,7 +256,7 @@ fn remove_comments(s: &str) -> Option<String> {
     Some(result)
 }
 
-/// Remove `<metadata>`, `<title>`, `<desc>` elements and empty `<defs>`.
+/// Remove `<metadata>`, `<title>` and `<desc>` elements.
 fn remove_metadata_elements(s: &str) -> Option<String> {
     let mut result: Option<String> = None;
     for tag in ["metadata", "title", "desc"] {
@@ -264,7 +278,7 @@ fn remove_metadata_elements(s: &str) -> Option<String> {
                 }
             };
             out.push_str(&cur[copied..start]);
-            copied = skip_ws(cur, end);
+            copied = skip_indent(cur, end);
             search = copied;
         }
         if copied > 0 {
@@ -272,16 +286,14 @@ fn remove_metadata_elements(s: &str) -> Option<String> {
             result = Some(out);
         }
     }
-    let cur: &str = result.as_deref().unwrap_or(s);
-    if let Some(next) = remove_empty_elements(cur, "defs") {
-        result = Some(next);
-    }
     result
 }
 
-/// Remove empty `<g>` elements (self-closing or with no content).
+/// Remove empty `<g>` and `<defs>` containers (self-closing or with no
+/// content) in one pass, so the result does not depend on pass order.
+/// Runs after metadata removal, which can leave containers empty.
 fn remove_empty_groups(s: &str) -> Option<String> {
-    remove_empty_elements(s, "g")
+    remove_empty_elements(s, &["g", "defs"])
 }
 
 /// Shorten floating point numbers in SVG path data: "1.000" → "1", "2.50" → "2.5".
@@ -623,8 +635,58 @@ mod tests {
     fn test_defs_with_children_kept() {
         let input = r#"<svg><defs><linearGradient id="g"/></defs><defs/><path d="M0 0"/></svg>"#;
         assert_eq!(
-            remove_metadata_elements(input).unwrap(),
+            remove_empty_groups(input).unwrap(),
             r#"<svg><defs><linearGradient id="g"/></defs><path d="M0 0"/></svg>"#
+        );
+    }
+
+    #[test]
+    fn test_empty_containers_collapse_regardless_of_nesting() {
+        // #60: `<defs><g/></defs>` used to leave `<defs></defs>` behind
+        // unless multipass ran, because groups were removed after defs.
+        for input in [
+            "<svg><defs><g/></defs><path d=\"M0 0\"/></svg>",
+            "<svg><g><defs/></g><path d=\"M0 0\"/></svg>",
+            "<svg><g><defs><g></g></defs></g><path d=\"M0 0\"/></svg>",
+        ] {
+            assert_eq!(
+                remove_empty_groups(input).unwrap(),
+                "<svg><path d=\"M0 0\"/></svg>",
+                "{input}"
+            );
+        }
+        // Metadata removal leaving a container empty is cleaned up in the
+        // same optimize run, without multipass.
+        let doc =
+            "<svg><defs><title>t</title></defs><g><desc>d</desc></g><path d=\"M0 0\"/></svg>\n";
+        assert_eq!(
+            optimize_svg(doc, &OptimizeConfig::default()).unwrap(),
+            "<svg><path d=\"M0 0\"/></svg>\n"
+        );
+        // A mismatched close is kept as content, never pops the wrong element.
+        assert_eq!(remove_empty_groups("<svg><g></defs></g></svg>"), None);
+    }
+
+    #[test]
+    fn test_removal_keeps_significant_spaces() {
+        // #60: removing an element also ate the following space, merging
+        // adjacent text ("Hello world" -> "Helloworld").
+        let input = "<svg><text>Hello<title>t</title> world<g/> again</text></svg>";
+        let config = OptimizeConfig::default();
+        assert_eq!(
+            optimize_svg(input, &config).unwrap(),
+            "<svg><text>Hello world again</text></svg>\n"
+        );
+        // Indentation (whitespace with a line break) is still dropped, at
+        // the removal sites; trim_whitespace then strips leading indents.
+        let pretty = "<svg>\n  <title>t</title>\n  <g/>\n  <path d=\"M0 0\"/>\n</svg>\n";
+        assert_eq!(
+            remove_metadata_elements(pretty).unwrap(),
+            "<svg>\n  <g/>\n  <path d=\"M0 0\"/>\n</svg>\n"
+        );
+        assert_eq!(
+            optimize_svg(pretty, &config).unwrap(),
+            "<svg>\n<path d=\"M0 0\"/>\n</svg>\n"
         );
     }
 
@@ -705,7 +767,7 @@ mod tests {
         // the document when it contained no matching tag (quadratic).
         let input = format!("<svg>{}</svg>", "<path d=\"M0 0\"/>".repeat(300_000));
         let t = std::time::Instant::now();
-        assert_eq!(remove_empty_elements(&input, "defs"), None);
+        assert_eq!(remove_empty_elements(&input, &["defs"]), None);
         assert_eq!(remove_empty_groups(&input), None);
         assert!(
             t.elapsed() < std::time::Duration::from_secs(2),
@@ -720,7 +782,7 @@ mod tests {
         let input = format!("<svg>{}", "<".repeat(200_000));
         let t = std::time::Instant::now();
         assert_eq!(remove_empty_groups(&input), None);
-        assert_eq!(remove_empty_elements(&input, "defs"), None);
+        assert_eq!(remove_empty_elements(&input, &["defs"]), None);
         assert!(remove_metadata_elements(&input).is_none());
         assert!(
             t.elapsed() < std::time::Duration::from_secs(2),

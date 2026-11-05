@@ -11,7 +11,7 @@ use covecto_core::{
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use super::state::AppState;
+use super::state::{AppState, JobError};
 
 #[derive(Serialize)]
 pub struct HealthResponse {
@@ -74,6 +74,9 @@ pub async fn vectorize_handler(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> Result<Response, AppError> {
+    // Take a queue place before reading the upload (#60): when the server
+    // is saturated the body is never buffered.
+    let ticket = state.admit().map_err(AppError::from)?;
     let mut params = VectorizeParams {
         format: None,
         engine: None,
@@ -208,21 +211,23 @@ pub async fn vectorize_handler(
     // Decode, vectorize and convert off the async runtime (#55).
     let max_dimension = state.limits().max_dimension;
     let (result, converted) = state
-        .run_job(move || -> covecto_core::Result<_> {
-            let img = load_image_from_bytes_with_limit(&data, None, max_dimension)?;
+        .run_job(ticket, move || -> Result<_, AppError> {
+            // Decode errors are the client's input (4xx); errors after a
+            // successful decode are ours (5xx).
+            let img = load_image_from_bytes_with_limit(&data, None, max_dimension)
+                .map_err(AppError::Decode)?;
             drop(data);
             let req = VectorizeRequest::new(img).with_config(config);
-            let result = core_vectorize(&req)?;
+            let result = core_vectorize(&req).map_err(AppError::Core)?;
             let converted = if output_format == OutputFormat::Svg {
                 None
             } else {
-                Some(convert_output(&result.svg, output_format)?)
+                Some(convert_output(&result.svg, output_format).map_err(AppError::Core)?)
             };
             Ok((result, converted))
         })
         .await
-        .map_err(AppError::Job)?
-        .map_err(AppError::Core)?;
+        .map_err(AppError::from)??;
 
     state.record_request(result.metadata.processing_time_ms);
 
@@ -259,6 +264,7 @@ pub async fn optimize_handler(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> Result<Json<OptimizeResponse>, AppError> {
+    let ticket = state.admit().map_err(AppError::from)?;
     let mut svg_data: Option<Bytes> = None;
     let mut preset = "default".to_string();
     let mut multipass = false;
@@ -297,9 +303,9 @@ pub async fn optimize_handler(
     };
 
     let optimized = state
-        .run_job(move || optimize_svg(&svg_str, &config))
+        .run_job(ticket, move || optimize_svg(&svg_str, &config))
         .await
-        .map_err(AppError::Job)?
+        .map_err(AppError::from)?
         .map_err(AppError::Core)?;
     let optimized_size = optimized.len();
     let reduction_pct = if original_size > 0 {
@@ -322,16 +328,46 @@ pub enum AppError {
     BadRequest(String),
     Core(covecto_core::Error),
     Multipart(axum::extract::multipart::MultipartError),
+    /// The uploaded image could not be decoded (client input).
+    Decode(covecto_core::Error),
+    /// The job queue is full or no slot freed up in time.
+    Unavailable(&'static str),
     /// The blocking job panicked or was cancelled.
     Job(tokio::task::JoinError),
+}
+
+impl From<JobError> for AppError {
+    fn from(e: JobError) -> Self {
+        match e {
+            JobError::Busy => AppError::Unavailable("Server busy: job queue is full"),
+            JobError::Timeout => {
+                AppError::Unavailable("Server busy: timed out waiting for a job slot")
+            }
+            JobError::Failed(e) => AppError::Job(e),
+        }
+    }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            AppError::Core(e @ covecto_core::Error::ImageTooLarge { .. }) => {
+            AppError::Core(e @ covecto_core::Error::ImageTooLarge { .. })
+            | AppError::Decode(e @ covecto_core::Error::ImageTooLarge { .. }) => {
                 (StatusCode::PAYLOAD_TOO_LARGE, e.to_string())
+            }
+            AppError::Decode(e) if e.is_unsupported_format() => {
+                (StatusCode::UNSUPPORTED_MEDIA_TYPE, e.to_string())
+            }
+            AppError::Decode(e) => (StatusCode::BAD_REQUEST, e.to_string()),
+            AppError::Unavailable(msg) => {
+                let body = serde_json::json!({ "error": msg });
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(axum::http::header::RETRY_AFTER, "1")],
+                    Json(body),
+                )
+                    .into_response();
             }
             AppError::Core(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             AppError::Multipart(e) => (StatusCode::BAD_REQUEST, e.to_string()),
