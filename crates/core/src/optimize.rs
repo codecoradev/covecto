@@ -350,51 +350,66 @@ fn shorten_numbers_in(d: &str, out: &mut String) {
             i = next;
             continue;
         }
+        // Tokenize one number per the SVG path grammar:
+        //   sign? (digits ('.' digits?)? | '.' digits) (('e'|'E') sign? digits)?
         let start = i;
         if bytes[i] == b'-' {
             i += 1;
         }
         let int_start = i;
-        while i < len && bytes[i].is_ascii_digit() {
+        while digit_at(i) {
             i += 1;
         }
         let has_int = i > int_start;
-        if i >= len || bytes[i] != b'.' {
-            out.push_str(&d[start..i]);
-            continue;
-        }
-        i += 1;
-        let decimal_start = i;
-        while i < len && bytes[i].is_ascii_digit() {
+        let mut dot = None;
+        if i < len && bytes[i] == b'.' {
+            dot = Some(i);
             i += 1;
-        }
-        if i < len && (bytes[i] == b'e' || bytes[i] == b'E') {
-            i += 1;
-            if i < len && (bytes[i] == b'+' || bytes[i] == b'-') {
+            while digit_at(i) {
                 i += 1;
             }
-            while i < len && bytes[i].is_ascii_digit() {
-                i += 1;
+        }
+        let frac_end = i;
+        // An exponent needs at least one digit; otherwise the 'e' is not part
+        // of this number. Exponent digits never include '.', so "1e1.0" is
+        // 1e1 followed by the separate number .0.
+        let exp_digits_at = if i < len && (bytes[i] == b'e' || bytes[i] == b'E') {
+            let j = if i + 1 < len && (bytes[i + 1] == b'+' || bytes[i + 1] == b'-') {
+                i + 2
+            } else {
+                i + 1
+            };
+            digit_at(j).then_some(j)
+        } else {
+            None
+        };
+        if let Some(mut j) = exp_digits_at {
+            while digit_at(j) {
+                j += 1;
             }
-            out.push_str(&d[start..i]);
+            // Numbers with an exponent are copied verbatim.
+            out.push_str(&d[start..j]);
+            i = j;
             continue;
         }
-        let mut trim_to = i;
-        while trim_to > decimal_start && bytes[trim_to - 1] == b'0' {
+        let Some(dot) = dot else {
+            out.push_str(&d[start..frac_end]);
+            continue;
+        };
+        let mut trim_to = frac_end;
+        while trim_to > dot + 1 && bytes[trim_to - 1] == b'0' {
             trim_to -= 1;
         }
-        if trim_to == decimal_start {
-            // Whole fraction is zero. Keep the number as-is when dropping it
-            // would change the token stream: a following "." starts the next
-            // number ("1.0.5" = 1.0 and .5, not 1.5), and ".0" has no integer
-            // digits left to emit.
-            if !has_int || (i < len && bytes[i] == b'.') {
-                out.push_str(&d[start..i]);
-            } else {
-                out.push_str(&d[start..decimal_start - 1]); // skip the dot
-            }
-        } else {
+        if trim_to > dot + 1 {
+            // Some non-zero fraction digits remain: "2.50" -> "2.5".
             out.push_str(&d[start..trim_to]);
+        } else if has_int && !(frac_end < len && bytes[frac_end] == b'.') {
+            // Whole fraction is zero and the integer part carries the value:
+            // "3.00" -> "3". Not when a '.' follows ("1.0.5" = 1.0 and .5).
+            out.push_str(&d[start..dot]);
+        } else {
+            // ".0", "-.00", or followed by '.': keep as written.
+            out.push_str(&d[start..frac_end]);
         }
     }
 }
@@ -721,6 +736,16 @@ mod tests {
     }
 
     #[test]
+    fn test_shorten_numbers_exponent_boundaries() {
+        // "1e1.0" is 1e1 then .0 (exponents have no '.'); nothing may vanish.
+        let input = r#"<path d="M1e1.0 5 1e-1.0 2E+3.00 1.50e2 3.0e 4.10E-2.50"/>"#;
+        assert_eq!(
+            shorten_path_numbers(input).unwrap(),
+            r#"<path d="M1e1.0 5 1e-1.0 2E+3.00 1.50e2 3e 4.10E-2.5"/>"#
+        );
+    }
+
+    #[test]
     fn test_shorten_numbers_skips_arc_arguments() {
         // Arc flags may be unseparated: "0,01.0" = flag 0, flag 1, then 1.0.
         let input = r#"<path d="M1.50 2a1,1,0,01.0,2L3.0 4.50"/>"#;
@@ -848,5 +873,48 @@ mod tests {
             "{:?}",
             t.elapsed()
         );
+    }
+
+    #[test]
+    fn test_shorten_numbers_preserves_geometry_usvg_oracle() {
+        // Property test with an independent oracle: usvg's path parser must
+        // see identical geometry before and after number shortening.
+        const TOKENS: &[&str] = &[
+            "M", "m", "L", "l", "H", "v", "C", "s", "Q", "t", "A", "a", "Z", " ", ",", "-",
+            ".", "0", "1", "5", "9", "00", ".0", "1.0", "2.50", "3.", "e", "E", "e-", "1e1",
+            "0", "1", ".5",
+        ];
+        fn geometry(d: &str) -> String {
+            let svg = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><path d="{d}"/></svg>"#
+            );
+            match usvg::Tree::from_str(&svg, &usvg::Options::default()) {
+                Ok(tree) => format!("{:?}", tree.root()),
+                Err(e) => format!("error: {e}"),
+            }
+        }
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut compared = 0;
+        for _ in 0..4_000 {
+            let n = 1 + (next() % 24) as usize;
+            let mut d = String::from("M");
+            for _ in 0..n {
+                d.push_str(TOKENS[(next() % TOKENS.len() as u64) as usize]);
+            }
+            let input = format!(r#"<path d="{d}"/>"#);
+            let Some(out) = shorten_path_numbers(&input) else {
+                continue;
+            };
+            let short = &out[r#"<path d=""#.len()..out.len() - r#""/>"#.len()];
+            assert_eq!(geometry(&d), geometry(short), "d={d:?} -> {short:?}");
+            compared += 1;
+        }
+        assert!(compared > 500, "only {compared} inputs exercised");
     }
 }

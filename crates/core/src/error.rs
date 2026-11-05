@@ -66,9 +66,10 @@ pub const DEFAULT_MAX_DIMENSION: u32 = 8192;
 /// highly compressible upload cannot expand past `max_dimension²` pixels.
 ///
 /// This bounds, but does not make small, the work per image: at the default
-/// 8192 the decoded RGBA buffer alone can reach 256 MiB, before engine copies
-/// and output. Size `max_dimension` together with the job concurrency limit
-/// to fit the memory available.
+/// 8192, a 16-bit source decodes to up to 512 MiB and the 8-bit RGBA copy
+/// adds 256 MiB, before engine copies and output (~768 MiB peak per job).
+/// Size `max_dimension` together with the job concurrency limit to fit the
+/// memory available.
 pub fn load_image_from_bytes_with_limit(
     data: &[u8],
     format_hint: Option<&str>,
