@@ -14,7 +14,7 @@ lists each one with its replacement. The full list is in the
 
 | You use… | What to do |
 |----------|------------|
-| The CLI with SVG output and no `--profile`/`--preset` mixing | Nothing. Scripts that check the exit code see `1` when a file fails (see [CLI](#cli)) |
+| The CLI with SVG output and no `--profile`/`--preset` mixing | Usually nothing. Images over 8192 px per side now need `--max-dimension`, and scripts that check the exit code see `1` when a file fails (see [CLI](#cli)) |
 | The CLI or the API with `--profile`/`--preset` plus individual options | Check the results: explicit options now win (see [Options](#options)) |
 | The HTTP API | Send only documented fields, once each, and handle `400`, `408`, `413`, `415` and `503` (see [HTTP API](#http-api)) |
 | `covecto-core` as a library | Bump to `covecto-core = "0.2"` and apply the [library changes](#library-covecto-core) |
@@ -45,7 +45,11 @@ let img = load_image(Path::new("in.png"), ImageLimits::UNLIMITED)?; // the old, 
 ```
 
 A file is now recognised by its content first and its extension second, so a
-JPEG saved as `.png` loads. An image over the limit is `Error::ImageTooLarge`.
+JPEG saved as `.png` loads. Bytes are recognised by their content only: the
+format hint is gone, so formats without a signature (such as TGA) no longer
+load from bytes. Write them to a file with the right extension, or decode them
+with the `image` crate yourself. An image over the limit is
+`Error::ImageTooLarge`.
 
 ### Engine modules
 
@@ -112,6 +116,9 @@ let config = covecto_core::options::resolve([
 ])?;
 ```
 
+A serialized 0.1 config that still contains `spline_preset` deserializes
+without an error, but the preset is ignored. Move it to `("preset", ...)`.
+
 Unknown names, bad values and repeated options are errors
 (`Error::UnknownName`, `Error::InvalidOption`, `Error::DuplicateOption`).
 `options::OPTIONS` lists every option with its type and a help line.
@@ -140,12 +147,13 @@ options.
 
 ## CLI
 
-- Exit code `1` when any file in a batch fails, or when a `--dry-run` cannot
-  read a file (0.1 printed the error and exited `0`).
+- Exit code `1` when any file in a batch fails, or when a `--dry-run` with the
+  default `auto` engine cannot read a file (0.1 printed the error and exited
+  `0`). With an explicit `--engine`, a dry run does not open the files.
 - Images over 8192 px per side are rejected before decoding. Raise the limit
   with `--max-dimension <PX>` or turn it off with `--max-dimension 0`.
-- `--dry-run` shows the engine a real run would use. With `--engine auto` it
-  decodes each image, so it is slower than in 0.1.
+- `--dry-run` shows the engine a real run would use. With the default `auto`
+  engine it decodes each image, so it is slower than in 0.1.
 - Output is written to a hidden temporary file next to the target and renamed
   into place. A failed run never truncates or deletes an existing file. An
   interrupted run may leave a `.covecto-<pid>-<n>.tmp` file behind.

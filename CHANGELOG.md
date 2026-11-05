@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] - 2026-11-05
 
-Performance and robustness release. Large photos trace in seconds instead of minutes, the API has a bounded job queue, the SVG optimizer no longer corrupts output, and every frontend resolves options, loads images and writes output formats through one place in `covecto-core`. Output is byte-identical to 0.1.2 except Spline output for images above 2 MP (see below).
+Performance and robustness release. Large photos trace in seconds instead of minutes, the API has a bounded job queue, the SVG optimizer no longer corrupts output, and every frontend resolves options, loads images and writes output formats through one place in `covecto-core`. With default settings, output is byte-identical to 0.1.2 except for Spline on images above 2 MP, Auto's engine choice on large photo-like images, and the optimizer fixes (see below). Combining a profile or preset with individual options can also give different output, because explicit options now win.
 
 **This release breaks the library interface and some CLI/API behaviour.** See the [upgrade guide](https://github.com/codecoradev/covecto/blob/main/docs/migration-0.2.md) for each change and its replacement.
 

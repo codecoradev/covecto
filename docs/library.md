@@ -42,12 +42,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Streaming to a Writer
 
-For large images, use `vectorize_to` to write directly to a file without buffering the entire SVG in memory:
+For large images, use `vectorize_to` to write directly to a file. PixelExact output is streamed as it is produced; Spline output (and any output the optimizer rewrites) is built in memory first and then written:
 
 ```rust
 use covecto_core::{vectorize_to, VectorizeRequest, Engine, VectorizeConfig};
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let img = image::open("large-photo.jpg")?.to_rgba8();
@@ -60,6 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut file = BufWriter::new(File::create("output.svg")?);
     let result = vectorize_to(&mut file, &request)?;
+    file.flush()?; // report write errors instead of losing them on drop
 
     println!("Wrote {} bytes, {} paths", result.metadata.svg_byte_size, result.metadata.path_count);
     Ok(())
