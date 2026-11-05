@@ -170,9 +170,16 @@ fn remove_empty_elements(s: &str, name: &str) -> Option<String> {
             continue;
         }
 
-        if is_tag_at(s, name, lt)
-            && let Some((end, self_closing)) = tag_end(s, lt)
-        {
+        let Some((end, self_closing)) = tag_end(s, lt) else {
+            // Unterminated markup: nothing after it can be parsed reliably.
+            // Keep the rest verbatim; retrying at every later '<' would make
+            // this quadratic on input like "<<<<...".
+            mark_content(&mut stack);
+            out.push_str(&s[lt..]);
+            break;
+        };
+
+        if is_tag_at(s, name, lt) {
             if self_closing {
                 i = skip_ws(s, end);
                 changed = true;
@@ -186,7 +193,6 @@ fn remove_empty_elements(s: &str, name: &str) -> Option<String> {
 
         // Any other markup counts as content of the enclosing element.
         mark_content(&mut stack);
-        let end = tag_end(s, lt).map_or(lt + 1, |(end, _)| end);
         out.push_str(&s[lt..end]);
         i = end;
     }
@@ -307,9 +313,12 @@ fn shorten_numbers_in(d: &str, out: &mut String) {
         if !starts_number {
             // Copy everything up to the next possible number start verbatim
             // (keeps multi-byte UTF-8 intact).
-            let next = d[i + 1..]
+            // Step over one whole char: `i` may start a multi-byte UTF-8
+            // sequence, and slicing at `i + 1` would split it.
+            let step = d[i..].chars().next().map_or(1, char::len_utf8);
+            let next = d[i + step..]
                 .find(|c: char| c.is_ascii_digit() || c == '-' || c == '.')
-                .map_or(len, |p| i + 1 + p);
+                .map_or(len, |p| i + step + p);
             out.push_str(&d[i..next]);
             i = next;
             continue;
@@ -648,6 +657,43 @@ mod tests {
     }
 
     #[test]
+    fn test_unterminated_markup_is_linear() {
+        // Regression: tag_end scanned to EOF at every '<' (quadratic).
+        let input = format!("<svg>{}", "<".repeat(200_000));
+        let t = std::time::Instant::now();
+        assert_eq!(remove_empty_groups(&input), None);
+        assert_eq!(remove_empty_elements(&input, "defs"), None);
+        assert!(remove_metadata_elements(&input).is_none());
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            t.elapsed()
+        );
+        // Empty groups before the unterminated tail are still removed.
+        assert_eq!(
+            remove_empty_groups("<svg><g/><x a=\"").unwrap(),
+            "<svg><x a=\""
+        );
+    }
+
+    #[test]
+    fn test_shorten_numbers_non_ascii_inside_path_data() {
+        // Regression: slicing at i + 1 panicked inside a multi-byte char.
+        for input in [
+            r#"<path d="M1.5é"/>"#,
+            r#"<path d="éM1.50"/>"#,
+            r#"<path d="M1.50½2.0"/>"#,
+        ] {
+            let out = shorten_path_numbers(input).unwrap();
+            assert!(out.is_char_boundary(out.len()));
+        }
+        assert_eq!(
+            shorten_path_numbers(r#"<path d="M1.50½2.0"/>"#).unwrap(),
+            r#"<path d="M1.5½2"/>"#
+        );
+    }
+
+    #[test]
     fn test_clean_empty_attributes_standalone_only() {
         let input = r#"<g id="" data-id=""><path class="" d="M0 0"/></g>"#;
         assert_eq!(
@@ -663,6 +709,87 @@ mod tests {
         assert_eq!(
             remove_metadata_elements(input).unwrap(),
             "<svg><path d=\"M0 0\"/></svg>"
+        );
+    }
+
+    #[test]
+    fn test_fuzz_optimizer_no_panic_and_linear() {
+        // Deterministic fuzz over SVG-ish tokens, multi-byte chars and broken
+        // markup: no pass may panic, and a large adversarial input must stay
+        // fast (catches slicing inside UTF-8 and quadratic rescans).
+        const TOKENS: &[&str] = &[
+            "<",
+            ">",
+            "/",
+            "\"",
+            "'",
+            " ",
+            "\n",
+            "<g",
+            "<g>",
+            "</g>",
+            "<g/>",
+            "<defs>",
+            "</defs>",
+            "<title>",
+            "</title>",
+            "<desc",
+            "<metadata>",
+            "<!--",
+            "-->",
+            "<?xml",
+            "?>",
+            "d=\"",
+            " d=\"",
+            "id=\"\"",
+            " class=\"\"",
+            "data-id=\"\"",
+            "1",
+            "0",
+            ".",
+            "-",
+            "e",
+            "5.0",
+            ".0",
+            "1.50",
+            "é",
+            "½",
+            "😀",
+            "M",
+            "L",
+        ];
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let presets = [OptimizePreset::Default, OptimizePreset::Safe];
+        for _ in 0..3_000 {
+            let len = (next() % 40) as usize;
+            let doc: String = (0..len)
+                .map(|_| TOKENS[(next() % TOKENS.len() as u64) as usize])
+                .collect();
+            for preset in presets {
+                let config = OptimizeConfig {
+                    preset,
+                    multipass: true,
+                    multipass_iterations: 3,
+                };
+                let _ = optimize_svg(&doc, &config).unwrap();
+            }
+        }
+
+        let big: String = (0..400_000)
+            .map(|_| TOKENS[(next() % TOKENS.len() as u64) as usize])
+            .collect();
+        let t = std::time::Instant::now();
+        let _ = optimize_svg(&big, &OptimizeConfig::default()).unwrap();
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            t.elapsed()
         );
     }
 }

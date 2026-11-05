@@ -332,10 +332,10 @@ impl IntoResponse for AppError {
             AppError::Core(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             AppError::Multipart(e) => (StatusCode::BAD_REQUEST, e.to_string()),
             AppError::Job(e) => {
-                tracing::error!("vectorization job failed: {e}");
+                tracing::error!("background job failed: {e}");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "Internal error while processing the image".to_string(),
+                    "Internal error while processing the request".to_string(),
                 )
             }
         };
