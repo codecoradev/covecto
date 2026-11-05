@@ -131,7 +131,7 @@ fn count_unique_colors(img: &RgbaImage, cap: usize) -> usize {
     };
 
     let mut colors: HashSet<u32> = HashSet::with_capacity(cap.min(4096));
-    for px in raw.chunks_exact(4).step_by(step) {
+    for px in raw.as_chunks::<4>().0.iter().step_by(step) {
         colors.insert(u32::from_ne_bytes([px[0], px[1], px[2], px[3]]));
         if colors.len() >= cap {
             break;
