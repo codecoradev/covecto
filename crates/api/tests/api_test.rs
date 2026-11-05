@@ -423,7 +423,7 @@ async fn test_spline_downscale_server_cap_applies() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let svg = json["svg"].as_str().unwrap();
     assert!(
-        svg.contains(r#"width="32" height="32" viewBox="0 0 22 22""#),
+        svg.contains(r#"width="32" height="32" viewBox="0 0 22 22" preserveAspectRatio="none""#),
         "{svg}"
     );
 }

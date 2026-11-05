@@ -39,8 +39,12 @@ impl Limits {
         if let Some(n) = env_parse::<u32>("COVECTO_MAX_DIMENSION").filter(|&n| n > 0) {
             limits.max_dimension = n;
         }
-        if let Some(mp) = env_parse::<f64>("COVECTO_SPLINE_MAX_MP").filter(|mp| mp.is_finite()) {
-            limits.spline_max_megapixels = mp.max(0.0);
+        // Invalid or negative values keep the safe default; only an explicit
+        // 0 turns the server cap off.
+        if let Some(mp) =
+            env_parse::<f64>("COVECTO_SPLINE_MAX_MP").filter(|mp| mp.is_finite() && *mp >= 0.0)
+        {
+            limits.spline_max_megapixels = mp;
         }
         limits
     }

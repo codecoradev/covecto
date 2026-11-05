@@ -67,22 +67,20 @@ fn auto_select_engine(img: &RgbaImage) -> Engine {
     // Count unique colors (sample-based for large images). Once the count
     // exceeds both thresholds below, the result is Spline regardless.
     let samples = sample_count(img.as_raw().len() / 4);
-    let denominator = density_denominator(total_pixels, samples);
-    let density_threshold = (denominator * 0.005) as usize;
-    let cap = 129usize.max(density_threshold + 1);
+    let threshold = spline_color_threshold(total_pixels, samples);
+    let cap = 129usize.max(threshold as usize + 1);
     let unique_colors = count_unique_colors(img, cap);
-    choose_engine(w, h, unique_colors, denominator)
+    choose_engine(w, h, unique_colors, threshold)
 }
 
 /// Pure engine decision.
 /// - Small images (<= 256x256) with few colors (<= 128) → PixelExact
-/// - Very high unique color density → Spline (likely a photo)
+/// - More unique colors than `threshold` → Spline (likely a photo)
 /// - Otherwise → PixelExact (lossless, fast)
-fn choose_engine(w: u32, h: u32, unique_colors: usize, denominator: f64) -> Engine {
-    let color_density = unique_colors as f64 / denominator;
+fn choose_engine(w: u32, h: u32, unique_colors: usize, threshold: f64) -> Engine {
     if w <= 256 && h <= 256 && unique_colors <= 128 {
         Engine::PixelExact
-    } else if color_density > 0.005 {
+    } else if unique_colors as f64 > threshold {
         Engine::Spline
     } else {
         Engine::PixelExact
@@ -103,18 +101,18 @@ fn sample_count(total: usize) -> usize {
     total.div_ceil(step)
 }
 
-/// What the unique-color count is divided by. Normally the total pixel
-/// count. But the count comes from at most ~65k-131k samples, so for images
-/// above ~13.1 MP `samples / total` can never exceed the 0.005 threshold and
-/// Spline could never be chosen (a large photo went to PixelExact and
-/// produced a huge SVG, #60). In that range only, the density is measured
-/// over the samples. Below it the decision is unchanged.
-fn density_denominator(total_pixels: f64, samples: usize) -> f64 {
-    if total_pixels * 0.005 >= samples as f64 {
-        samples as f64
-    } else {
-        total_pixels
-    }
+/// Unique (sampled) colors needed to pick Spline: 0.5% of the pixel count,
+/// capped at a quarter of the samples.
+///
+/// The count comes from at most ~65k-131k samples, so without the cap the
+/// requirement passes the sample count around 13.1 MP and Spline could
+/// never be chosen (a large photo went to PixelExact and produced a huge
+/// SVG, #60). The cap keeps the requirement continuous in image size: images
+/// below ~3.3 MP are decided exactly as before, and above that a photo needs
+/// more than 25% of the samples to be distinct, which flat screenshots with
+/// antialiased text (hundreds to a few thousand colors) do not reach.
+fn spline_color_threshold(total_pixels: f64, samples: usize) -> f64 {
+    (total_pixels * 0.005).min(samples as f64 * 0.25)
 }
 
 /// Count unique RGBA colors in an image, up to `cap`.
@@ -494,19 +492,33 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_select_large_photo_blind_spot() {
-        // Above ~13.1 MP the old density (sampled count / total pixels) could
-        // never pass 0.005, so even an all-unique photo chose PixelExact.
-        let total = 4000.0 * 4000.0;
+    fn test_auto_select_large_images() {
+        let threshold =
+            |w: usize, h: usize| spline_color_threshold((w * h) as f64, sample_count(w * h));
+        // Above ~13.1 MP the old rule needed more unique colors than samples,
+        // so even an all-unique photo chose PixelExact.
         let samples = sample_count(4000 * 4000);
         assert!(samples < 2 * COLOR_SAMPLE_LIMIT, "{samples}");
-        let denom = density_denominator(total, samples);
-        assert_eq!(denom, samples as f64);
-        assert_eq!(choose_engine(4000, 4000, samples, denom), Engine::Spline);
-        assert_eq!(choose_engine(4000, 4000, 40, denom), Engine::PixelExact);
-        // Below the blind spot the decision is unchanged (divides by total).
-        let (t2, s2) = (2000.0 * 2000.0, sample_count(2000 * 2000));
-        assert_eq!(density_denominator(t2, s2), t2);
+        assert_eq!(
+            choose_engine(4000, 4000, samples, threshold(4000, 4000)),
+            Engine::Spline
+        );
+        // A 5K screenshot with antialiased text (a few thousand colors) stays
+        // lossless, like the same content at 4K.
+        assert_eq!(
+            choose_engine(5120, 2880, 3_000, threshold(5120, 2880)),
+            Engine::PixelExact
+        );
+        assert_eq!(
+            choose_engine(3840, 2160, 3_000, threshold(3840, 2160)),
+            Engine::PixelExact
+        );
+        // Small and mid-size images are decided exactly as before (0.5%).
+        assert_eq!(threshold(1000, 1000), 5_000.0);
+        assert_eq!(threshold(512, 512), 512.0 * 512.0 * 0.005);
+        // No cliff around 13.1 MP: the requirement changes smoothly.
+        let (a, b) = (threshold(3600, 3600), threshold(3640, 3640));
+        assert!((a - b).abs() / a < 0.1, "{a} vs {b}");
     }
 
     #[test]

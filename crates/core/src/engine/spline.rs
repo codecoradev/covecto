@@ -62,8 +62,11 @@ fn restore_display_size(svg: String, (tw, th): (u32, u32), (w, h): (u32, u32)) -
     };
     let mut out = String::with_capacity(svg.len() + 32);
     out.push_str(&svg[..at]);
+    // Each axis is scaled independently back to the original size; rounding
+    // the traced size can shift the aspect ratio slightly, so do not let the
+    // default `xMidYMid meet` letterbox it.
     out.push_str(&format!(
-        r#"width="{w}" height="{h}" viewBox="0 0 {tw} {th}">"#
+        r#"width="{w}" height="{h}" viewBox="0 0 {tw} {th}" preserveAspectRatio="none">"#
     ));
     out.push_str(&svg[at + traced.len()..]);
     Ok(out)
@@ -182,7 +185,7 @@ mod tests {
         let (tw, th) = traced_size(100, 60, Some(0.0015)).unwrap();
         assert!(
             svg.contains(&format!(
-                r#"width="100" height="60" viewBox="0 0 {tw} {th}">"#
+                r#"width="100" height="60" viewBox="0 0 {tw} {th}" preserveAspectRatio="none">"#
             )),
             "{}",
             &svg[..svg.len().min(300)]
