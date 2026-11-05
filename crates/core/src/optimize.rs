@@ -113,23 +113,6 @@ fn tag_end(s: &str, start: usize) -> Option<(usize, bool)> {
     None
 }
 
-/// Skip whitespace starting at `i`.
-fn skip_ws(s: &str, i: usize) -> usize {
-    s[i..]
-        .char_indices()
-        .find(|(_, c)| !c.is_whitespace())
-        .map(|(j, _)| i + j)
-        .unwrap_or(s.len())
-}
-
-/// After removing an element ending at `i`, also drop the whitespace that
-/// follows it, but only when that whitespace is indentation (contains a line
-/// break). A plain space may be significant text (`Hello<title/> world`).
-fn skip_indent(s: &str, i: usize) -> usize {
-    let j = skip_ws(s, i);
-    if s[i..j].contains('\n') { j } else { i }
-}
-
 /// Remove elements whose name is in `names` that are self-closing
 /// (`<x .../>`) or have no content (`<x ...></x>`, whitespace only).
 /// Non-empty elements are kept. Nested empties collapse fully, across names
@@ -172,7 +155,7 @@ fn remove_empty_elements(s: &str, names: &[&str]) -> Option<String> {
                 Some((open_at, false, top)) if top == k => {
                     stack.pop();
                     out.truncate(open_at);
-                    i = skip_indent(s, after);
+                    i = after;
                     changed = true;
                 }
                 Some((_, true, top)) if top == k => {
@@ -202,7 +185,7 @@ fn remove_empty_elements(s: &str, names: &[&str]) -> Option<String> {
 
         if let Some(k) = names.iter().position(|n| is_tag_at(s, n, lt)) {
             if self_closing {
-                i = skip_indent(s, end);
+                i = end;
                 changed = true;
             } else {
                 stack.push((out.len(), false, k));
@@ -278,7 +261,7 @@ fn remove_metadata_elements(s: &str) -> Option<String> {
                 }
             };
             out.push_str(&cur[copied..start]);
-            copied = skip_indent(cur, end);
+            copied = end;
             search = copied;
         }
         if copied > 0 {
@@ -677,12 +660,19 @@ mod tests {
             optimize_svg(input, &config).unwrap(),
             "<svg><text>Hello world again</text></svg>\n"
         );
-        // Indentation (whitespace with a line break) is still dropped, at
-        // the removal sites; trim_whitespace then strips leading indents.
+        // Removal never eats whitespace, even with a line break inside text:
+        // "Hello<title/>\n  world" must not become "Helloworld".
+        let multiline = "<svg><text>Hello<title>t</title>\n  world</text></svg>";
+        assert_eq!(
+            optimize_svg(multiline, &config).unwrap(),
+            "<svg><text>Hello\nworld</text></svg>\n"
+        );
+        // Indentation left behind by removed elements is collapsed by
+        // trim_whitespace (blank lines and leading indents).
         let pretty = "<svg>\n  <title>t</title>\n  <g/>\n  <path d=\"M0 0\"/>\n</svg>\n";
         assert_eq!(
             remove_metadata_elements(pretty).unwrap(),
-            "<svg>\n  <g/>\n  <path d=\"M0 0\"/>\n</svg>\n"
+            "<svg>\n  \n  <g/>\n  <path d=\"M0 0\"/>\n</svg>\n"
         );
         assert_eq!(
             optimize_svg(pretty, &config).unwrap(),
@@ -868,7 +858,7 @@ mod tests {
         let input = "<svg><title>a</title><desc/>\n<metadata>m</metadata><path d=\"M0 0\"/></svg>";
         assert_eq!(
             remove_metadata_elements(input).unwrap(),
-            "<svg><path d=\"M0 0\"/></svg>"
+            "<svg>\n<path d=\"M0 0\"/></svg>"
         );
     }
 

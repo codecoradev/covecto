@@ -531,6 +531,7 @@ dependencies = [
  "anyhow",
  "axum",
  "covecto-core",
+ "futures-util",
  "http-body-util",
  "image 0.25.10",
  "serde",

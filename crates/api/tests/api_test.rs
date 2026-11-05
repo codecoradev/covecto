@@ -475,3 +475,44 @@ async fn test_saturated_queue_returns_503_before_reading_body() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(state.admitted(), 0);
 }
+
+#[tokio::test]
+async fn test_stalled_upload_times_out_and_frees_its_place() {
+    // #60 review: the body is read while holding a queue place, so a client
+    // that stops sending mid-upload must not keep that place forever.
+    use futures_util::stream::{self, StreamExt};
+    let state = covecto_api::create_app_state_with_limits(covecto_api::Limits {
+        max_concurrency: 1,
+        max_queue: 0,
+        upload_timeout: std::time::Duration::from_millis(150),
+        ..covecto_api::Limits::default()
+    });
+    let boundary = "stall";
+    let head = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.png\"\r\n\r\npartial"
+    );
+    let body = stream::once(async move { Ok::<_, std::io::Error>(axum::body::Bytes::from(head)) })
+        .chain(stream::pending());
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/vectorize")
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from_stream(body))
+        .unwrap();
+
+    let t = std::time::Instant::now();
+    let resp = covecto_api::app_with_state(state.clone())
+        .oneshot(req)
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::REQUEST_TIMEOUT);
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(2),
+        "{:?}",
+        t.elapsed()
+    );
+    assert_eq!(state.admitted(), 0, "the queue place must be released");
+}

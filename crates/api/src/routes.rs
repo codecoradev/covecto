@@ -101,37 +101,44 @@ pub async fn vectorize_handler(
     };
     let mut image_data: Option<Bytes> = None;
 
-    while let Some(field) = multipart.next_field().await.map_err(AppError::Multipart)? {
-        let name = field.name().unwrap_or("").to_string();
-        if name == "file" || name.is_empty() {
-            image_data = Some(field.bytes().await.map_err(AppError::Multipart)?);
-        } else {
-            let value = field.text().await.map_err(AppError::Multipart)?;
-            match name.as_str() {
-                "format" => params.format = Some(value),
-                "engine" => params.engine = Some(value),
-                "optimize" => params.optimize = value.parse().ok(),
-                "optimize_preset" => params.optimize_preset = Some(value),
-                "multipass" => params.multipass = value.parse().ok(),
-                "multipass_iterations" => params.multipass_iterations = value.parse().ok(),
-                "preset" => params.preset = Some(value),
-                "profile" => params.profile = Some(value),
-                "color_precision" => params.color_precision = value.parse().ok(),
-                "filter_speckle" => params.filter_speckle = value.parse().ok(),
-                "corner_threshold" => params.corner_threshold = value.parse().ok(),
-                "splice_threshold" => params.splice_threshold = value.parse().ok(),
-                "hierarchical" => params.hierarchical = Some(value),
-                "path_simplify" => params.path_simplify = Some(value),
-                "layer_difference" => params.layer_difference = value.parse().ok(),
-                "length_threshold" => params.length_threshold = value.parse().ok(),
-                "max_iterations" => params.max_iterations = value.parse().ok(),
-                "path_precision" => params.path_precision = value.parse().ok(),
-                "spline_max_mp" => params.spline_max_mp = value.parse().ok(),
-                "color_mode" => params.color_mode = Some(value),
-                _ => {}
+    // A slow upload holds a queue place, so bound how long reading it may
+    // take (#60): otherwise slow clients could keep every place busy.
+    tokio::time::timeout(state.limits().upload_timeout, async {
+        while let Some(field) = multipart.next_field().await.map_err(AppError::Multipart)? {
+            let name = field.name().unwrap_or("").to_string();
+            if name == "file" || name.is_empty() {
+                image_data = Some(field.bytes().await.map_err(AppError::Multipart)?);
+            } else {
+                let value = field.text().await.map_err(AppError::Multipart)?;
+                match name.as_str() {
+                    "format" => params.format = Some(value),
+                    "engine" => params.engine = Some(value),
+                    "optimize" => params.optimize = value.parse().ok(),
+                    "optimize_preset" => params.optimize_preset = Some(value),
+                    "multipass" => params.multipass = value.parse().ok(),
+                    "multipass_iterations" => params.multipass_iterations = value.parse().ok(),
+                    "preset" => params.preset = Some(value),
+                    "profile" => params.profile = Some(value),
+                    "color_precision" => params.color_precision = value.parse().ok(),
+                    "filter_speckle" => params.filter_speckle = value.parse().ok(),
+                    "corner_threshold" => params.corner_threshold = value.parse().ok(),
+                    "splice_threshold" => params.splice_threshold = value.parse().ok(),
+                    "hierarchical" => params.hierarchical = Some(value),
+                    "path_simplify" => params.path_simplify = Some(value),
+                    "layer_difference" => params.layer_difference = value.parse().ok(),
+                    "length_threshold" => params.length_threshold = value.parse().ok(),
+                    "max_iterations" => params.max_iterations = value.parse().ok(),
+                    "path_precision" => params.path_precision = value.parse().ok(),
+                    "spline_max_mp" => params.spline_max_mp = value.parse().ok(),
+                    "color_mode" => params.color_mode = Some(value),
+                    _ => {}
+                }
             }
         }
-    }
+        Ok::<(), AppError>(())
+    })
+    .await
+    .map_err(|_| AppError::UploadTimeout)??;
 
     let data = image_data.ok_or(AppError::BadRequest("No file provided".into()))?;
 
@@ -270,20 +277,27 @@ pub async fn optimize_handler(
     let mut multipass = false;
     let mut multipass_iterations = 10usize;
 
-    while let Some(field) = multipart.next_field().await.map_err(AppError::Multipart)? {
-        let name = field.name().unwrap_or("").to_string();
-        if name == "file" || name.is_empty() {
-            svg_data = Some(field.bytes().await.map_err(AppError::Multipart)?);
-        } else {
-            let value = field.text().await.map_err(AppError::Multipart)?;
-            match name.as_str() {
-                "preset" => preset = value,
-                "multipass" => multipass = value.parse().unwrap_or(false),
-                "multipass_iterations" => multipass_iterations = value.parse().unwrap_or(10),
-                _ => {}
+    // A slow upload holds a queue place, so bound how long reading it may
+    // take (#60): otherwise slow clients could keep every place busy.
+    tokio::time::timeout(state.limits().upload_timeout, async {
+        while let Some(field) = multipart.next_field().await.map_err(AppError::Multipart)? {
+            let name = field.name().unwrap_or("").to_string();
+            if name == "file" || name.is_empty() {
+                svg_data = Some(field.bytes().await.map_err(AppError::Multipart)?);
+            } else {
+                let value = field.text().await.map_err(AppError::Multipart)?;
+                match name.as_str() {
+                    "preset" => preset = value,
+                    "multipass" => multipass = value.parse().unwrap_or(false),
+                    "multipass_iterations" => multipass_iterations = value.parse().unwrap_or(10),
+                    _ => {}
+                }
             }
         }
-    }
+        Ok::<(), AppError>(())
+    })
+    .await
+    .map_err(|_| AppError::UploadTimeout)??;
 
     let data = svg_data.ok_or(AppError::BadRequest("No file provided".into()))?;
     let svg_str = String::from_utf8(data.into())
@@ -332,6 +346,8 @@ pub enum AppError {
     Decode(covecto_core::Error),
     /// The job queue is full or no slot freed up in time.
     Unavailable(&'static str),
+    /// The request body was not received within the upload timeout.
+    UploadTimeout,
     /// The blocking job panicked or was cancelled.
     Job(tokio::task::JoinError),
 }
@@ -360,6 +376,10 @@ impl IntoResponse for AppError {
                 (StatusCode::UNSUPPORTED_MEDIA_TYPE, e.to_string())
             }
             AppError::Decode(e) => (StatusCode::BAD_REQUEST, e.to_string()),
+            AppError::UploadTimeout => (
+                StatusCode::REQUEST_TIMEOUT,
+                "Upload not received within the time limit".to_string(),
+            ),
             AppError::Unavailable(msg) => {
                 let body = serde_json::json!({ "error": msg });
                 return (

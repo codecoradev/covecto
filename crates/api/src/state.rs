@@ -14,6 +14,9 @@ pub struct Limits {
     pub max_queue: usize,
     /// How long a request may wait for a job slot before it gets `503`.
     pub queue_timeout: Duration,
+    /// How long reading a request body may take before `408`. The body is
+    /// read while holding a queue place, so this bounds slow uploads.
+    pub upload_timeout: Duration,
     /// Maximum width or height of an uploaded image, checked before decoding.
     pub max_dimension: u32,
     /// Server-side spline input budget in megapixels; larger images are
@@ -29,8 +32,9 @@ impl Default for Limits {
             .unwrap_or(4);
         Self {
             max_concurrency,
-            max_queue: max_concurrency * 4,
+            max_queue: max_concurrency.saturating_mul(4),
             queue_timeout: Duration::from_secs(30),
+            upload_timeout: Duration::from_secs(30),
             max_dimension: covecto_core::DEFAULT_MAX_DIMENSION,
             spline_max_megapixels: covecto_core::DEFAULT_SPLINE_MAX_MEGAPIXELS,
         }
@@ -44,8 +48,8 @@ impl Limits {
     pub fn from_env() -> Self {
         let mut limits = Self::default();
         if let Some(n) = env_parse::<usize>("COVECTO_MAX_CONCURRENCY").filter(|&n| n > 0) {
-            limits.max_concurrency = n;
-            limits.max_queue = n * 4;
+            limits.max_concurrency = n.min(MAX_CONCURRENCY);
+            limits.max_queue = limits.max_concurrency.saturating_mul(4);
         }
         // 0 is valid: no waiting, only `max_concurrency` requests at a time.
         if let Some(n) = env_parse::<usize>("COVECTO_MAX_QUEUE") {
@@ -53,6 +57,9 @@ impl Limits {
         }
         if let Some(secs) = env_parse::<u64>("COVECTO_QUEUE_TIMEOUT_SECS").filter(|&s| s > 0) {
             limits.queue_timeout = Duration::from_secs(secs);
+        }
+        if let Some(secs) = env_parse::<u64>("COVECTO_UPLOAD_TIMEOUT_SECS").filter(|&s| s > 0) {
+            limits.upload_timeout = Duration::from_secs(secs);
         }
         if let Some(n) = env_parse::<u32>("COVECTO_MAX_DIMENSION").filter(|&n| n > 0) {
             limits.max_dimension = n;
@@ -80,6 +87,9 @@ impl Limits {
         }
     }
 }
+
+/// Upper bound for `max_concurrency` (well below `Semaphore::MAX_PERMITS`).
+const MAX_CONCURRENCY: usize = 1 << 16;
 
 fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
     std::env::var(key).ok()?.trim().parse().ok()
@@ -135,7 +145,9 @@ pub fn create_app_state_with_limits(limits: Limits) -> AppState {
         inner: Arc::new(AppStateInner {
             request_count: AtomicU64::new(0),
             total_processing_ms: AtomicU64::new(0),
-            jobs: Arc::new(Semaphore::new(limits.max_concurrency.max(1))),
+            jobs: Arc::new(Semaphore::new(
+                limits.max_concurrency.clamp(1, MAX_CONCURRENCY),
+            )),
             admitted: AtomicUsize::new(0),
             limits,
         }),
@@ -171,16 +183,27 @@ impl AppState {
     /// `max_concurrency + max_queue` requests are already admitted. Call this
     /// before reading the request body.
     pub fn admit(&self) -> Result<Ticket, JobError> {
-        let capacity = self.inner.limits.max_concurrency.max(1) + self.inner.limits.max_queue;
-        let prev = self.inner.admitted.fetch_add(1, Ordering::AcqRel);
-        let ticket = Ticket {
-            inner: self.inner.clone(),
-        };
-        if prev >= capacity {
-            drop(ticket); // undo the increment
-            return Err(JobError::Busy);
+        let limits = &self.inner.limits;
+        let capacity = limits
+            .max_concurrency
+            .clamp(1, MAX_CONCURRENCY)
+            .saturating_add(limits.max_queue);
+        // Increment only when below capacity, so concurrent rejections never
+        // make the count read high and turn away a request that would fit.
+        let admitted = &self.inner.admitted;
+        let mut n = admitted.load(Ordering::Acquire);
+        loop {
+            if n >= capacity {
+                return Err(JobError::Busy);
+            }
+            match admitted.compare_exchange_weak(n, n + 1, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => break,
+                Err(current) => n = current,
+            }
         }
-        Ok(ticket)
+        Ok(Ticket {
+            inner: self.inner.clone(),
+        })
     }
 
     /// Run CPU-bound `work` on the blocking thread pool, at most
@@ -326,6 +349,20 @@ mod tests {
         drop(tickets);
         assert_eq!(st.admitted(), 0);
         assert!(st.admit().is_ok());
+    }
+
+    #[test]
+    fn huge_limits_do_not_overflow() {
+        let st = create_app_state_with_limits(Limits {
+            max_concurrency: usize::MAX,
+            max_queue: usize::MAX,
+            ..Limits::default()
+        });
+        let t = st
+            .admit()
+            .expect("capacity saturates instead of overflowing");
+        assert_eq!(st.admitted(), 1);
+        drop(t);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -203,6 +203,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '408':
+          description: The request body was not received within COVECTO_UPLOAD_TIMEOUT_SECS
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '503':
           description: Server busy (job queue full, or timed out waiting for a job slot). Retry after the Retry-After header.
           headers:
@@ -278,6 +284,12 @@ paths:
                     example: 46.7
         '400':
           description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '408':
+          description: The request body was not received within COVECTO_UPLOAD_TIMEOUT_SECS
           content:
             application/json:
               schema:
