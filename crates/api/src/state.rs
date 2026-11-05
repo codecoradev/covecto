@@ -22,6 +22,8 @@ pub struct Limits {
     /// needs about 0.85 MB/s.
     pub upload_timeout: Duration,
     /// Maximum width or height of an uploaded image, checked before decoding.
+    /// `0` means no limit (settable only in code: `COVECTO_MAX_DIMENSION`
+    /// ignores 0, so a deployment cannot switch the limit off by accident).
     pub max_dimension: u32,
     /// Server-side spline input budget in megapixels; larger images are
     /// downscaled before tracing. Clients may request a lower budget, never a

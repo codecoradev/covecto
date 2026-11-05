@@ -8,7 +8,7 @@
 use std::io::{BufRead, Seek};
 use std::path::{Path, PathBuf};
 
-use image::{ImageReader, RgbaImage};
+use image::{ImageDecoder, ImageReader, RgbaImage};
 
 use crate::{Error, Result};
 
@@ -101,24 +101,21 @@ pub fn load_image<'a>(
     limits: ImageLimits,
 ) -> Result<RgbaImage> {
     match source.into() {
-        ImageSource::Path(path) => decode(
-            || Ok(ImageReader::open(path)?.with_guessed_format()?),
-            limits,
-        ),
+        ImageSource::Path(path) => decode(ImageReader::open(path)?.with_guessed_format()?, limits),
         ImageSource::Bytes(data) => decode(
-            || Ok(ImageReader::new(std::io::Cursor::new(data)).with_guessed_format()?),
+            ImageReader::new(std::io::Cursor::new(data)).with_guessed_format()?,
             limits,
         ),
     }
 }
 
-fn decode<R: BufRead + Seek>(
-    mut reader: impl FnMut() -> Result<ImageReader<R>>,
-    limits: ImageLimits,
-) -> Result<RgbaImage> {
-    let (width, height) = reader()?.into_dimensions()?;
+/// One decoder for both the size check and the decode, so the checked
+/// header is the one that gets decoded (a file cannot be swapped in between).
+fn decode<R: BufRead + Seek>(reader: ImageReader<R>, limits: ImageLimits) -> Result<RgbaImage> {
+    let decoder = reader.into_decoder()?;
+    let (width, height) = decoder.dimensions();
     limits.check(width, height)?;
-    Ok(reader()?.decode()?.into_rgba8())
+    Ok(image::DynamicImage::from_decoder(decoder)?.into_rgba8())
 }
 
 #[cfg(test)]
