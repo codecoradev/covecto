@@ -3,6 +3,7 @@ members = [
     "crates/core",
     "crates/cli",
     "crates/api",
+    "crates/wasm",
 ]
 resolver = "3"
 
@@ -20,7 +21,13 @@ covecto-core = { path = "crates/core", version = "0.2" }
 covecto-api = { path = "crates/api", version = "0.2" }
 
 # Image
-image = "0.25"
+# Default features minus "avif" (an AVIF encoder via rav1e, never used here:
+# covecto only writes PNG). rav1e pulls wasm-bindgen on wasm32, which would
+# stop covecto-wasm loading without JS glue. AVIF decoding was never enabled.
+image = { version = "0.25", default-features = false, features = [
+    "bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm",
+    "qoi", "tga", "tiff", "webp", "rayon",
+] }
 
 # Vectorization engines
 vtracer = "0.6.5"

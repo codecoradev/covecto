@@ -549,8 +549,6 @@ version = "0.2.0"
 dependencies = [
  "criterion",
  "image 0.25.10",
- "pngtosvg",
- "rayon",
  "resvg",
  "roxmltree",
  "serde",
@@ -562,6 +560,14 @@ dependencies = [
  "usvg",
  "visioncortex",
  "vtracer",
+]
+
+[[package]]
+name = "covecto-wasm"
+version = "0.2.0"
+dependencies = [
+ "covecto-core",
+ "image 0.25.10",
 ]
 
 [[package]]
@@ -1070,7 +1076,6 @@ dependencies = [
  "qoi",
  "ravif",
  "rayon",
- "rgb",
  "tiff 0.11.3",
  "zune-core 0.5.1",
  "zune-jpeg 0.5.15",
@@ -1640,18 +1645,6 @@ dependencies = [
  "fdeflate",
  "flate2",
  "miniz_oxide 0.8.9",
-]
-
-[[package]]
-name = "pngtosvg"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "608b7673b22f40fcce71281a6e5a20174ef030bbb1d2d8268b05998728ba084c"
-dependencies = [
- "clap 4.6.4",
- "image 0.25.10",
- "rayon",
- "winres",
 ]
 
 [[package]]
@@ -2436,15 +2429,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "toml"
-version = "0.5.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4f7f0dd8d50a853a531c426359045b1998f04219d88799810762cd4ad314234"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "tower"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2903,15 +2887,6 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
-
-[[package]]
-name = "winres"
-version = "0.1.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b68db261ef59e9e52806f688020631e987592bd83619edccda9c47d42cde4f6c"
-dependencies = [
- "toml",
-]
 
 [[package]]
 name = "wit-bindgen"

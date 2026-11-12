@@ -49,10 +49,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
 
+  wasm:
+    name: WASM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p covecto-wasm --target wasm32-unknown-unknown --release --locked
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node crates/wasm/tests/smoke.mjs target/wasm32-unknown-unknown/release/covecto_wasm.wasm
+      - run: ls -l target/wasm32-unknown-unknown/release/covecto_wasm.wasm
+
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [check, format, clippy, test]
+    needs: [check, format, clippy, test, wasm]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
