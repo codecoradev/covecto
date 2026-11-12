@@ -107,6 +107,17 @@ let result = vectorize(&request).unwrap();
 println!("{} paths in {}ms", result.metadata.path_count, result.metadata.processing_time_ms);
 ```
 
+## Browser (WebAssembly)
+
+`covecto-wasm` runs both engines in the browser, with no server and no JS glue: the module has no imports, so `WebAssembly.instantiate(bytes, {})` in a Web Worker is enough. Each release ships `covecto-wasm-vX.Y.Z.wasm`; build it yourself with:
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo build -p covecto-wasm --target wasm32-unknown-unknown --release
+```
+
+ABI and an example: [`crates/wasm/README.md`](crates/wasm/README.md).
+
 ## Benchmarks
 
 ```bash
