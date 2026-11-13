@@ -59,8 +59,8 @@ curl http://localhost:3000/v1/health
 | Tag | Description |
 |-----|-------------|
 | `latest` | Latest stable release |
-| `0.2.0` | Pinned version |
-| `0.2` | Latest 0.2.x patch release |
+| `0.3.0` | Pinned version |
+| `0.3` | Latest 0.3.x patch release |
 
 Images are available on [GHCR](https://github.com/codecoradev/covecto/pkgs/container/covecto) and [Docker Hub](https://hub.docker.com/r/codecoradev/covecto).
 

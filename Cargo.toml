@@ -8,7 +8,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/codecoradev/covecto"
@@ -17,8 +17,8 @@ authors = ["CodeCora <hello@codecora.dev>"]
 
 [workspace.dependencies]
 # Internal
-covecto-core = { path = "crates/core", version = "0.2" }
-covecto-api = { path = "crates/api", version = "0.2" }
+covecto-core = { path = "crates/core", version = "0.3" }
+covecto-api = { path = "crates/api", version = "0.3" }
 
 # Image
 # Default features minus "avif" (an AVIF encoder via rav1e, never used here:

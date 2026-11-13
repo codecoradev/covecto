@@ -63,3 +63,5 @@ try {
 ```
 
 Large or noisy photos can produce very large SVGs; downscale before calling (Spline already traces above 2 MP at a reduced size, see `spline_max_megapixels`) and cap the output size you accept.
+
+Two things learned from running it in Chrome on real photos: pass an explicit `engine=spline` (or `pixel-exact`) rather than `engine=auto` for photos, because `auto` chose pixel-exact for a smooth sunset photo and produced a 29 MB, 64,000-path SVG; and expect a single 2048 px photo to take roughly 8-75 s in WASM (one thread), so run it in a Worker, show progress, and keep a watchdog.
