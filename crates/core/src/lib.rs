@@ -26,7 +26,6 @@ pub use optimize::{MAX_MULTIPASS_ITERATIONS, optimize_svg};
 use engine::{EngineOutput, pixel_exact, spline};
 use image::RgbaImage;
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
 
 /// Result of a vectorization operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,7 +47,8 @@ pub struct ResultMetadata {
     pub svg_byte_size: usize,
     /// Number of SVG path elements.
     pub path_count: usize,
-    /// Processing time in milliseconds.
+    /// Processing time in milliseconds. Always 0 on `wasm32-unknown-unknown`,
+    /// which has no clock.
     pub processing_time_ms: u64,
     /// Compression ratio (svg_size / raw_pixel_bytes).
     pub compression_ratio: f64,
@@ -239,11 +239,41 @@ fn warn_if_pathological(engine: Engine, (w, h): (u32, u32), path_count: usize) {
     }
 }
 
+/// Times a run for [`ResultMetadata::processing_time_ms`].
+///
+/// `wasm32-unknown-unknown` has no clock (`std::time::Instant::now` panics
+/// there), so the browser build reports 0 ms and the caller times the call
+/// itself (e.g. `performance.now()`).
+struct Stopwatch {
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    start: std::time::Instant,
+}
+
+impl Stopwatch {
+    fn start() -> Self {
+        Self {
+            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+            start: std::time::Instant::now(),
+        }
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        {
+            self.start.elapsed().as_millis() as u64
+        }
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            0
+        }
+    }
+}
+
 /// Main vectorization entry point.
 pub fn vectorize(request: &VectorizeRequest) -> Result<VectorizeResult> {
     let engine = select_engine(&request.config, &request.image);
 
-    let start = Instant::now();
+    let start = Stopwatch::start();
     let raw_svg = match engine {
         Engine::PixelExact => pixel_exact::vectorize(&request.image),
         Engine::Spline => spline::vectorize(&request.image, &request.config),
@@ -257,7 +287,7 @@ pub fn vectorize(request: &VectorizeRequest) -> Result<VectorizeResult> {
         raw_svg
     };
 
-    let elapsed = start.elapsed();
+    let elapsed_ms = start.elapsed_ms();
     let (w, h) = (request.image.width(), request.image.height());
     let raw_pixel_bytes = (w as usize * h as usize) * 4;
     let svg_byte_size = svg.len();
@@ -275,7 +305,7 @@ pub fn vectorize(request: &VectorizeRequest) -> Result<VectorizeResult> {
             input_size: (w, h),
             svg_byte_size,
             path_count,
-            processing_time_ms: elapsed.as_millis() as u64,
+            processing_time_ms: elapsed_ms,
             compression_ratio,
         },
         svg,
@@ -303,7 +333,7 @@ pub fn vectorize_to<W: std::io::Write>(
 ) -> Result<StreamResult> {
     let engine = select_engine(&request.config, &request.image);
 
-    let start = Instant::now();
+    let start = Stopwatch::start();
     let (w, h) = (request.image.width(), request.image.height());
     let raw_pixel_bytes = (w as usize * h as usize) * 4;
 
@@ -321,7 +351,7 @@ pub fn vectorize_to<W: std::io::Write>(
     };
     warn_if_pathological(engine, (w, h), path_count);
 
-    let elapsed = start.elapsed();
+    let elapsed_ms = start.elapsed_ms();
     let compression_ratio = if raw_pixel_bytes > 0 {
         svg_byte_size as f64 / raw_pixel_bytes as f64
     } else {
@@ -334,7 +364,7 @@ pub fn vectorize_to<W: std::io::Write>(
             input_size: (w, h),
             svg_byte_size,
             path_count,
-            processing_time_ms: elapsed.as_millis() as u64,
+            processing_time_ms: elapsed_ms,
             compression_ratio,
         },
     })

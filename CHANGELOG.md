@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-13
+
+Browser build. `covecto-wasm` runs both engines in a Web Worker with no server and no JS glue, and releases now ship `covecto-wasm-vX.Y.Z.wasm`. The library, CLI and HTTP API are unchanged.
+
+### Added
+- `covecto-wasm`: a browser build of `covecto-core` for `wasm32-unknown-unknown` (#70). The module has no imports, so it loads with `WebAssembly.instantiate(bytes, {})` in a Web Worker without JS glue. Both engines and Auto are available, with the same Options as the CLI and API (`engine=auto&preset=photo`). Releases ship `covecto-wasm-vX.Y.Z.wasm`; CI builds it and runs a Node smoke test. See `crates/wasm/README.md`
+
+### Changed
+- `ResultMetadata::processing_time_ms` is 0 on `wasm32-unknown-unknown`, which has no clock; native builds are unchanged
+- The `image` dependency no longer enables its `avif` feature (an AVIF encoder covecto never used; AVIF decoding was never enabled). This drops `rav1e` and its dependencies from the build
+- `covecto-core` no longer depends on `pngtosvg` and `rayon`, which it did not use
+
 ## [0.2.0] - 2026-11-05
 
 Performance and robustness release. Large photos trace in seconds instead of minutes, the API has a bounded job queue, the SVG optimizer no longer corrupts output, and every frontend resolves options, loads images and writes output formats through one place in `covecto-core`. With default settings, output is byte-identical to 0.1.2 except for Spline on images above 2 MP, Auto's engine choice on large photo-like images, and the optimizer fixes (see below). Combining a profile or preset with individual options can also give different output, because explicit options now win.
@@ -117,7 +129,8 @@ Output:
 ### Contributors
 - @ajianaz — initial release (#23, #24, #25, #26, #27, #28)
 
-[Unreleased]: https://github.com/codecoradev/covecto/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/codecoradev/covecto/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/codecoradev/covecto/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/codecoradev/covecto/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/codecoradev/covecto/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/codecoradev/covecto/compare/v0.1.0...v0.1.1

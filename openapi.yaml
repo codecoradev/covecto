@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Covecto API
-  version: 0.2.0
+  version: 0.3.0
   description: Dual-engine image vectorization — pixel-exact for icons, smooth curves for art.
   license:
     name: MIT
@@ -31,7 +31,7 @@ paths:
                     example: ok
                   version:
                     type: string
-                    example: "0.2.0"
+                    example: "0.3.0"
 
   /v1/metrics:
     get:

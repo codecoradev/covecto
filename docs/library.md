@@ -10,7 +10,7 @@ title: Using as a Crate
 
 ```toml
 [dependencies]
-covecto-core = "0.2"
+covecto-core = "0.3"
 image = "0.25"
 ```
 
