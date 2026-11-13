@@ -506,7 +506,7 @@ dependencies = [
 
 [[package]]
 name = "covecto"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap 4.6.4",
@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "covecto-api"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -545,7 +545,7 @@ dependencies = [
 
 [[package]]
 name = "covecto-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "image 0.25.10",
@@ -564,7 +564,7 @@ dependencies = [
 
 [[package]]
 name = "covecto-wasm"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "covecto-core",
  "image 0.25.10",
