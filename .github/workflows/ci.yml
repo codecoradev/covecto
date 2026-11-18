@@ -65,6 +65,22 @@ jobs:
       - run: node crates/wasm/tests/smoke.mjs target/wasm32-unknown-unknown/release/covecto_wasm.wasm
       - run: ls -l target/wasm32-unknown-unknown/release/covecto_wasm.wasm
 
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+        working-directory: docs
+      - run: bun run build
+        working-directory: docs
+
   build:
     name: Build
     runs-on: ubuntu-latest
